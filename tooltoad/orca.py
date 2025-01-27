@@ -13,9 +13,11 @@ from tooltoad.utils import WorkingDir, check_executable, stream
 _logger = logging.getLogger("orca")
 
 # see https://www.orcasoftware.de/tutorials_orca/first_steps/parallel.html
-load_dotenv()
+dotenv_path = Path(__file__).resolve().parent.parent / ".env" # load .env file from parent dir.
+load_dotenv(dotenv_path)
 
 ORCA_CMD = os.getenv("ORCA_EXE")
+
 assert (
     ORCA_CMD
 ), "ORCA_EXE not found in environment variables, please set it to the path of the ORCA executable."
@@ -186,6 +188,8 @@ def write_orca_input(
     inputstr += "*\n"
     inputstr += "\n"  # magic line
 
+
+    print(inputstr)
     return inputstr
 
 
