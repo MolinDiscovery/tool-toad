@@ -27,8 +27,12 @@ assert (
 ), "OPEN_MPI_DIR not found in environment variables, please set it to the path of the OpenMPI installation."
 ORCA_DIR = Path(ORCA_CMD).parent
 XTB_EXE = os.getenv("XTB_EXE", "xtb")
-SET_ENV = f'env - XTBEXE={XTB_EXE} PATH="{ORCA_DIR}:{OPEN_MPI_DIR}/bin:$PATH" LD_LIBRARY_PATH="{OPEN_MPI_DIR}/lib:$LD_LIBRARY_PATH" DYLD_LIBRARY_PATH="{OPEN_MPI_DIR}/lib:$DYLD_LIBRARY_PATH"'
 
+XTBPATH = os.getenv("XTBPATH", "") # Read XTBPATH, default to empty string if not set
+if not XTBPATH:
+    _logger.warning("XTBPATH not found in environment variables. xTB calculations via ORCA might fail.")
+
+SET_ENV = f'env - XTBEXE={XTB_EXE} XTBPATH={XTBPATH} PATH="{ORCA_DIR}:{OPEN_MPI_DIR}/bin:$PATH" LD_LIBRARY_PATH="{OPEN_MPI_DIR}/lib:$LD_LIBRARY_PATH" DYLD_LIBRARY_PATH="{OPEN_MPI_DIR}/lib:$DYLD_LIBRARY_PATH"'
 
 def orca_calculate(
     atoms: List[str],
