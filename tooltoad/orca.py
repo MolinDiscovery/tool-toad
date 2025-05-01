@@ -5,32 +5,35 @@ from pathlib import Path
 from typing import List
 
 import numpy as np
-from dotenv import load_dotenv
 
 from tooltoad.chemutils import hartree2kcalmol, read_multi_xyz, xyz2ac
 from tooltoad.utils import WorkingDir, check_executable, stream
+from tooltoad.config import find_and_load_dotenv
 
 _logger = logging.getLogger("orca")
 
-# see https://www.orcasoftware.de/tutorials_orca/first_steps/parallel.html
-dotenv_path = Path(__file__).resolve().parent.parent / ".env" # load .env file from parent dir.
-load_dotenv(dotenv_path)
+find_and_load_dotenv()
 
 ORCA_CMD = os.getenv("ORCA_EXE")
+OPEN_MPI_DIR = os.getenv("OPEN_MPI_DIR")
+XTB_EXE = os.getenv("XTB_EXE", "xtb")
+XTBPATH = os.getenv("XTBPATH", "")
 
 assert (
     ORCA_CMD
-), "ORCA_EXE not found in environment variables, please set it to the path of the ORCA executable."
-OPEN_MPI_DIR = os.getenv("OPEN_MPI_DIR").rstrip("/")
-assert (
-    OPEN_MPI_DIR
-), "OPEN_MPI_DIR not found in environment variables, please set it to the path of the OpenMPI installation."
-ORCA_DIR = Path(ORCA_CMD).parent
-XTB_EXE = os.getenv("XTB_EXE", "xtb")
+), "ORCA_EXE not found in environment variables (checked .env and system env). Please set it."
 
-XTBPATH = os.getenv("XTBPATH", "") # Read XTBPATH, default to empty string if not set
+if OPEN_MPI_DIR:
+    OPEN_MPI_DIR = OPEN_MPI_DIR.rstrip("/")
+else:
+     assert (
+        OPEN_MPI_DIR
+    ), "OPEN_MPI_DIR not found in environment variables (checked .env and system env). Please set it."
+
+ORCA_DIR = Path(ORCA_CMD).parent
+
 if not XTBPATH:
-    _logger.warning("XTBPATH not found in environment variables. xTB calculations via ORCA might fail.")
+    _logger.warning("XTBPATH not found in environment variables (checked .env and system env). xTB calculations via ORCA might fail if parameters aren't found elsewhere.")
 
 SET_ENV = f'env - XTBEXE={XTB_EXE} XTBPATH={XTBPATH} PATH="{ORCA_DIR}:{OPEN_MPI_DIR}/bin:$PATH" LD_LIBRARY_PATH="{OPEN_MPI_DIR}/lib:$LD_LIBRARY_PATH" DYLD_LIBRARY_PATH="{OPEN_MPI_DIR}/lib:$DYLD_LIBRARY_PATH"'
 
