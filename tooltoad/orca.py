@@ -195,8 +195,6 @@ def write_orca_input(
     inputstr += "*\n"
     inputstr += "\n"  # magic line
 
-
-    print(inputstr)
     return inputstr
 
 
