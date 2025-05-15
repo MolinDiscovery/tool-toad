@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -92,6 +93,7 @@ def xtb_calculate(
     results = read_xtb_results(lines)
     if "hess" in options:
         results.update(read_thermodynamics(lines))
+        results["vibs"] = read_vibrations(lines)
     if "grad" in options:
         with open(work_dir / "mol.engrad", "r") as f:
             grad_lines = f.readlines()
@@ -106,6 +108,7 @@ def xtb_calculate(
         results["opt_coords"] = read_opt_structure(lines)[-1]
     if "ohess" in options:
         results.update(read_thermodynamics(lines))
+        results["vibs"] = read_vibrations(lines)
         results["opt_coords"] = read_opt_structure(lines)[-1]
     if detailed_input or detailed_input_str:
         if any(
@@ -219,22 +222,68 @@ def read_opt_structure(lines: list[str]) -> tuple[list[str], list[list[float]]]:
 
 
 def read_thermodynamics(lines: list[str]) -> dict:
-    """Read thermodynamics output of frequency calculation."""
+    """Read thermodynamics output of frequency calculation, including Gibbs free energy."""
     thermo_idx = np.nan
-    thermo_properties = {}
+    thermo_properties: dict[str, float] = {}
+
     for i, line in enumerate(lines):
         line = line.strip()
         if "THERMODYNAMIC" in line:
             thermo_idx = i
-        if i > (thermo_idx + 2):
+        if i > (thermo_idx + 2) and not np.isnan(thermo_idx):
             if 20 * ":" in line:
                 thermo_idx = np.nan
             elif 20 * "." in line:
                 continue
             else:
-                tmp = line.strip(":").strip().strip("->").split()[:-1]
-                thermo_properties[" ".join(tmp[:-1])] = float(tmp[-1])
+                tmp = line.strip(':').strip().strip('->').split()[:-1]
+                thermo_properties[' '.join(tmp[:-1])] = float(tmp[-1])
+
+    pattern = re.compile(r"::\s*total free energy\s*([\-\d\.]+)\s*Eh", re.IGNORECASE)
+    for line in lines:
+        m = pattern.search(line)
+        if m:
+            thermo_properties['gibbs_energy'] = float(m.group(1))
+            break
+
     return thermo_properties
+
+
+def read_vibrations(lines: list[str]) -> list[dict] | None:
+    """Read vibrational frequencies from xtb output lines."""
+    vibrations = []
+    in_freq_block = False
+    freq_header = "projected vibrational frequencies (cm⁻¹)"
+    freq_line_start = "eigval :"
+
+    for line in lines:
+        line_strip = line.strip()
+
+        if freq_header in line_strip:
+            in_freq_block = True
+            continue
+
+        if in_freq_block:
+            if line_strip.startswith(freq_line_start):
+                try:
+                    freq_values = [float(f) for f in line_strip.split()[2:]]
+                    for freq in freq_values:
+                        if freq > 5.0 or freq < -5.0: # Threshold to filter near-zero modes
+                             vibrations.append({'frequency': freq})
+                except (ValueError, IndexError) as e:
+                    _logger.warning(f"Could not parse frequency line: '{line_strip}'. Error: {e}")
+            elif not line_strip:
+                in_freq_block = False
+                break
+            elif not line_strip.startswith(("reduced masses", "IR intensities", "-")):
+                 in_freq_block = False
+                 break
+
+    if not vibrations:
+        _logger.debug("No vibrational frequencies found in xtb output.")
+        return None
+
+    return vibrations
 
 
 def read_gradients(lines: list[str]) -> np.ndarray:
