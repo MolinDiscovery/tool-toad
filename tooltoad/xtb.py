@@ -55,12 +55,12 @@ def xtb_calculate(
     xyz_file = write_xyz(atoms, coords, work_dir)
 
     # clean xtb method option
-    for k, value in options.items():
-        if "gfn" in k.lower():
-            if value is not None and value is not True:
-                options[k + str(value)] = None
-                del options[k]
-                break
+    # for k, value in options.items():
+    #     if "gfn" in k.lower():
+    #         if value is not None and value is not True:
+    #             options[k + str(value)] = None
+    #             del options[k]
+    #             break
 
     # options to xTB command
     cmd = f"{xtb_cmd} --chrg {charge} --uhf {multiplicity-1} --norestart --verbose --parallel {n_cores} "
