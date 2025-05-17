@@ -392,13 +392,21 @@ def read_xtb_results(lines: list[str]) -> dict:
 
         # read dipole moment
         if i > (dipole_idx + 2):
-            dip_x, dip_y, dip_z, dip_norm = [
-                float(x) for x in line.split()[1:]
-            ]  # norm is in Debye
-            dipole_vec = np.array(
-                [dip_x, dip_y, dip_z]
-            )  # in a.u. (*2.5412 ot convert to Debye)
-            dipole_idx = np.nan
+            parts = line.split()[1:]
+            if len(parts) == 4:
+                dx, dy, dz, norm = map(float, parts)
+                dipole_vec = np.array([dx, dy, dz])
+                dipole_norm = norm
+            dipole_idx = np.nan        
+        # if i > (dipole_idx + 2):
+        #     dip_x, dip_y, dip_z, dip_norm = [
+        #         float(x) for x in line.split()[1:]
+        #     ] 
+        #     # norm is in Debye
+        #     dipole_vec = np.array(
+        #         [dip_x, dip_y, dip_z]
+        #     )  # in a.u. (*2.5412 ot convert to Debye)
+        #     dipole_idx = np.nan
 
         # read quadrupole moment
         if i > (quadrupole_idx + 3):
@@ -431,7 +439,7 @@ def read_xtb_results(lines: list[str]) -> dict:
         results["polarizability"] = polarizability
     if not np.isnan(dipole_idx):
         results["dipole_vec"] = dipole_vec
-        results["dipole_norm"] = dip_norm
+        results["dipole_norm"] = dipole_norm
     if not np.isnan(quadrupole_idx):
         results["quadrupole_mat"] = quadrupole_mat
 
