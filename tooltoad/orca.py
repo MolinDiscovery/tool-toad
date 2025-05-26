@@ -88,7 +88,7 @@ def orca_calculate(
                 n_cores=n_cores,
             )
         )
-
+    
     # cmd = f'{set_env}; {orca_cmd} input.inp "--bind-to-core" | tee orca.out' # "--oversubscribe" "--use-hwthread-cpus"
     cmd = f'/bin/bash -c "{set_env} {orca_cmd} input.inp "--use-hwthread-cpus" | tee orca.out"'
     _logger.debug(f"Running Orca as: {cmd}")
@@ -195,6 +195,7 @@ def write_orca_input(
     inputstr += "*\n"
     inputstr += "\n"  # magic line
 
+    # print(inputstr) # orca input
     return inputstr
 
 
