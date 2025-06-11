@@ -604,3 +604,72 @@ def get_orca_results(
         results["atoms"], results["opt_coords"] = results["opt_structure"]
 
     return results
+
+
+def mock_orca_calculate(
+    atoms,
+    coords,
+    charge=0,
+    multiplicity=1,
+    options=None,
+    calc_dir=None,
+    memory=4,
+    n_cores=1,
+    xtra_inp_str=None
+):
+    import time, os, random
+    import numpy as np
+
+    time.sleep(0.01)
+    opts = options or {}
+    lower_keys = [str(k).lower() for k in opts.keys()]
+    want_opt = any("opt" in k for k in lower_keys)
+    want_freq = any(("freq" in k) or ("hess" in k) for k in lower_keys)
+
+    if calc_dir:
+        os.makedirs(calc_dir, exist_ok=True)
+        with open(f"{calc_dir}/mock_orca.out", "w") as f:
+            f.write(f"Mock ORCA calculation\nOptions: {options}\n")
+            f.write(f"Requested optimization? {want_opt}\n")
+            f.write(f"Requested Hessian/freq? {want_freq}\n")
+
+    coords_np = np.array(coords)
+    num_atoms = len(atoms)
+    num_modes = 3 * num_atoms - 6 if num_atoms > 2 else 0
+
+    vibs_data = None
+    gibbs = None
+    if want_freq and num_modes > 0:
+        frequencies = []
+        is_ts = want_opt and any("optts" in k for k in lower_keys)
+        if is_ts:
+            if random.random() < 0.9:
+                frequencies.append(random.uniform(-500, -50))
+            else:
+                num_imag = random.choice([0, 2, 3])
+                for _ in range(num_imag):
+                    frequencies.append(random.uniform(-500, -50))
+            pos_needed = num_modes - len(frequencies)
+        else:
+            pos_needed = num_modes
+        if pos_needed > 0:
+            frequencies.extend(np.random.uniform(50, 3000, pos_needed).tolist())
+        random.shuffle(frequencies)
+        vibs_data = []
+        for freq in frequencies:
+            dummy_mode = np.random.rand(num_atoms, 3).tolist()
+            vibs_data.append({"frequency": freq, "mode": dummy_mode})
+        gibbs = -490.0 - random.random() * 10
+
+    result = {
+        "electronic_energy": -500.0 - random.random() * 10,
+        "normal_termination": True,
+    }
+    if want_opt:
+        result["opt_coords"] = (coords_np + np.random.normal(0, 0.05, coords_np.shape)).tolist()
+    if vibs_data is not None:
+        result["vibs"] = vibs_data
+        result["gibbs_energy"] = gibbs
+    if calc_dir:
+        result["calc_dir"] = calc_dir
+    return result

@@ -451,6 +451,58 @@ def read_xtb_results(lines: list[str]) -> dict:
     return results
 
 
+def mock_xtb_calculate(
+    atoms,
+    coords,
+    charge=0,
+    multiplicity=1,
+    options=None,
+    detailed_input_str=None,
+    calc_dir=None,
+    n_cores=1,
+    memory=4,
+):
+    import time, random
+    import numpy as np
+
+    time.sleep(0.01)
+    num_atoms = len(atoms)
+    num_modes = 3 * num_atoms - 6 if num_atoms > 2 else 0
+    opts = options or {}
+    want_opt = any("opt" in str(k).lower() for k in opts.keys())
+    lower_keys = [str(k).lower() for k in opts.keys()]
+    want_hessian = any(("hess" in k) or (k == "freq") for k in lower_keys)
+
+    vibs_data = None
+    gibbs = None
+    if want_hessian and num_modes > 0:
+        freqs = []
+        is_ts = want_opt and ("ts" in str(opts.get("opt", "")).lower())
+        if is_ts and num_modes > 0:
+            freqs.append(random.uniform(-500, -50))
+            positive_count = num_modes - 1
+        else:
+            positive_count = num_modes
+        if positive_count > 0:
+            freqs.extend(np.random.uniform(50, 3000, positive_count).tolist())
+        random.shuffle(freqs)
+        vibs_data = [{"frequency": f} for f in freqs]
+        gibbs = -99.0 - random.random()
+
+    result = {
+        "electronic_energy": -100.0 - random.random(),
+        "normal_termination": True,
+    }
+    if want_opt:
+        coords_np = np.array(coords)
+        result["opt_coords"] = (coords_np + np.random.normal(0, 0.1, coords_np.shape)).tolist()
+    if vibs_data is not None:
+        result["vibs"] = vibs_data
+        result["gibbs_energy"] = gibbs
+    result["atoms"] = atoms
+    result["coords"] = coords
+    return result
+
 if __name__ == "__main__":
     atoms = ["C", "C", "C", "N", "C", "C", "N", "H", "H", "H", "H", "H", "H", "H"]
     coords = [

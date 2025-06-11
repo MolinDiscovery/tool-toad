@@ -514,11 +514,45 @@ def ac2xyz(atoms: List[str], coords: List[list]):
     return xyz
 
 
+from rdkit import Chem
+from rdkit.Chem import rdDetermineBonds
+
+def ac2smi(atoms: list[str], coords: list[tuple[float, float, float]]) -> str:
+    xyz = [f"{len(atoms)}", ""]
+    for atom, (x, y, z) in zip(atoms, coords):
+        xyz.append(f"{atom} {x:.6f} {y:.6f} {z:.6f}")
+    xyz_block = "\n".join(xyz) + "\n"
+
+    mol = Chem.MolFromXYZBlock(xyz_block)
+    if mol is None:
+        raise ValueError("Failed to parse XYZ; no molecule created.")
+
+    mol = Chem.Mol(mol)  # make writable
+    rdDetermineBonds.DetermineConnectivity(mol, useHueckel=True)
+
+    try:
+        Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL)
+    except Chem.SanitizeException:
+
+        Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL ^ Chem.SANITIZE_PROPERTIES)
+
+    try:
+        Chem.Kekulize(mol, clearAromaticFlags=True)
+    except Chem.KekulizeException:
+        Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL)
+
+    smi = Chem.MolToSmiles(mol, canonical=True)
+    if not smi:
+        raise ValueError("XYZ → SMILES conversion yielded empty string.")
+    return smi
+
+
 def ac2mol(
     atoms: List[str],
     coords: List[list],
     charge: int = 0,
     perceive_connectivity: bool = True,
+    perceive_connectivity_xtb: bool = False,
     sanitize: bool = True,
 ):
     """Converts atom symbols and coordinates to RDKit molecule."""
@@ -530,6 +564,7 @@ def ac2mol(
         rdkit_mol.GetAtomWithIdx(0).SetFormalCharge(charge)
     if perceive_connectivity:
         _determineConnectivity(rdkit_mol)
+
     return rdkit_mol
 
 
