@@ -759,5 +759,5 @@ def MolTo3DGrid(
             print(f"HTML export successful: {export_HTML}")
         except Exception as e:
             print(f"Error exporting HTML to '{export_HTML}': {e}")
-
+    
     viewer.show()
