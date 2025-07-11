@@ -877,7 +877,6 @@ def ac2mol(
     use_xtb: bool = True,
     sanitize: bool = False,
     perceive_connectivity_xtb: bool = False,
-    sanitize: bool = True,
 ):
     """Converts atom symbols and coordinates to RDKit molecule."""
     xyz = ac2xyz(atoms, coords)
