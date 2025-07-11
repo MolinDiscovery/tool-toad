@@ -10,10 +10,11 @@ import py3Dmol
 from matplotlib import patches
 from PIL import Image
 from rdkit import Chem
-from rdkit.Chem import Draw, rdDepictor
+from rdkit.Chem import Draw, rdDepictor, rdDetermineBonds
 from rdkit.Geometry import Point2D
+from scipy.interpolate import CubicSpline
 
-from tooltoad.chemutils import ac2xyz
+from tooltoad.chemutils import ac2mol, ac2xyz
 
 # load matplotlib style
 plt.style.use(os.path.dirname(__file__) + "/data/paper.mplstyle")
@@ -56,6 +57,7 @@ def draw2d(
     legend: str = None,
     atomLabels: dict = None,
     atomHighlights: dict = None,
+    bondLineWidth: int = 1,
     size=(800, 600),
     blackwhite=True,
 ):
@@ -89,14 +91,13 @@ def draw2d(
     dopts.legendFontSize = 45
     dopts.baseFontSize = 0.8
     dopts.additionalAtomLabelPadding = 0.1
-    dopts.bondLineWidth = 1
+    dopts.bondLineWidth = bondLineWidth
     dopts.scaleBondWidth = False
     if blackwhite:
         dopts.useBWAtomPalette()
     if atomLabels:
         for key, value in atomLabels.items():
             dopts.atomLabels[key] = value
-
     if legend:
         d2d.DrawMolecule(mol, legend=legend)
     else:
@@ -243,7 +244,7 @@ def draw3d(
                 mb = Chem.MolToMolBlock(mol, confId=confId, kekulize=kekulize)
                 p.addModel(mb, "sdf")
     p.setStyle({"sphere": {"radius": 0.4}, "stick": {}})
-    p.setBackgroundColor("0xeeeeee", int(~transparent))
+    p.setBackgroundColor("0xeeeeee", int(not (transparent)))
     if atomlabel:
         p.addPropertyLabels("index")
     else:
@@ -257,6 +258,37 @@ def draw3d(
         )
     p.zoomTo()
     return p
+
+
+def show_irc(irc):
+    view = py3Dmol.view(width=800, height=400, viewergrid=(1, 2))
+    try:
+        forward = ac2mol(
+            irc["irc"]["forward"]["atoms"], irc["irc"]["forward"]["opt_coords"]
+        )
+        rdDetermineBonds.DetermineBondOrders(forward)
+        sdf = Chem.MolToMolBlock(forward)
+        view.addModel(sdf, "sdf", viewer=(0, 0))
+        view.zoomTo(viewer=(0, 0))
+        view.setStyle({"sphere": {"radius": 0.4}, "stick": {}})
+        view.setBackgroundColor("0xeeeeee", 0)
+    except Exception as e:
+        print(e)
+
+    try:
+        backward = ac2mol(
+            irc["irc"]["backward"]["atoms"], irc["irc"]["backward"]["opt_coords"]
+        )
+        rdDetermineBonds.DetermineBondOrders(backward)
+        sdf = Chem.MolToMolBlock(backward)
+        view.addModel(sdf, "sdf", viewer=(0, 1))
+        view.zoomTo(viewer=(0, 1))
+        view.setStyle({"sphere": {"radius": 0.4}, "stick": {}})
+        view.setBackgroundColor("0xeeeeee", 0)
+    except Exception as e:
+        print(e)
+
+    return view
 
 
 def show_traj(input: str | dict, width: float = 600, height: float = 400):
@@ -275,6 +307,40 @@ def show_traj(input: str | dict, width: float = 600, height: float = 400):
             raise ValueError
     else:
         raise ValueError
+    p = py3Dmol.view(width=width, height=height)
+    p.addModelsAsFrames(traj, "xyz")
+    p.animate({"loop": "forward", "reps": 3})
+    p.setStyle({"sphere": {"radius": 0.4}, "stick": {}})
+    return p
+
+
+def interpolate_trajectory(positions, frame_multiplier: int = 10):
+    positions = np.asarray(positions)
+    num_frames = positions.shape[0]
+    frames = np.arange(num_frames)
+    new_frames = np.linspace(0, num_frames - 1, num=num_frames * frame_multiplier)
+
+    # Vectorized cubic spline interpolation
+    spline = CubicSpline(frames, positions, axis=0)
+    return spline(new_frames)
+
+
+def show_traj_v2(
+    atoms, coords, width: float = 600, height: float = 400, interpolation: int = 10
+):
+    """Show xyz trajectory.
+
+    Args:
+        atoms (list): List of atom symbols.
+        coords (list): List of coordinates.
+        width (float, optional): Width of py3dmol. Defaults to 600.
+        height (float, optional): Height of py3dmol. Defaults to 400.
+    """
+    if interpolation:
+        coords = interpolate_trajectory(coords, frame_multiplier=interpolation)
+    traj = ""
+    for coord in coords:
+        traj += ac2xyz(atoms, coord)
     p = py3Dmol.view(width=width, height=height)
     p.addModelsAsFrames(traj, "xyz")
     p.animate({"loop": "forward", "reps": 3})
@@ -325,13 +391,16 @@ def show_vibs(
 
 
 dopts = Chem.Draw.rdMolDraw2D.MolDrawOptions()
-dopts.prepareMolsForDrawing = True
-dopts.centreMoleculesBeforeDrawing = True
-dopts.drawMolsSameScale = True
-dopts.legendFontSize = 18
-dopts.minFontSize = 30
-dopts.padding = 0.05
-dopts.atomLabelFontSize = 40
+try:
+    dopts.legendFontSize = 18
+    dopts.minFontSize = 30
+    dopts.padding = 0.05
+    dopts.atomLabelFontSize = 40
+    dopts.drawMolsSameScale = True
+    dopts.centreMoleculesBeforeDrawing = True
+    dopts.prepareMolsForDrawing = True
+except AttributeError:
+    pass
 
 
 def drawMolInsert(

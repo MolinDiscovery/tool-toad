@@ -1,6 +1,10 @@
 import copy
+import json
 import logging
 import os
+import re
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import List
 
@@ -10,7 +14,7 @@ from tooltoad.chemutils import hartree2kcalmol, read_multi_xyz, xyz2ac
 from tooltoad.utils import WorkingDir, check_executable, stream
 from tooltoad.config import find_and_load_dotenv
 
-_logger = logging.getLogger("orca")
+_logger = logging.getLogger(__name__)
 
 find_and_load_dotenv()
 
@@ -51,6 +55,11 @@ def orca_calculate(
     orca_cmd: str = ORCA_CMD,
     set_env: str = SET_ENV,
     force: bool = False,
+    log_file: str | None = None,
+    read_files: list | None = None,
+    save_files: list | None = None,
+    save_dir: str | None = None,
+    data2file: None | dict = None,
 ) -> dict:
     """Runs ORCA calculation.
 
@@ -72,8 +81,26 @@ def orca_calculate(
     Returns:
          dict: {'atoms': ..., 'coords': ..., ...}
     """
+
+    if save_files:
+        assert save_dir, "save_dir must be provided if save_files are given"
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
     check_executable(orca_cmd)
     work_dir = WorkingDir(root=scr, name=calc_dir)
+    os.environ["XTBPATH"] = str(work_dir)
+
+    if data2file:
+        for filename, data in data2file.items():
+            with open(work_dir / filename, "w") as f:
+                f.write(data)
+
+    # append json output
+    if not xtra_inp_str:
+        xtra_inp_str = ""
+    xtra_inp_str += """\n%Output
+  JSONPropFile True
+End"""
 
     with open(work_dir / "input.inp", "w") as f:
         f.write(
@@ -88,22 +115,30 @@ def orca_calculate(
                 n_cores=n_cores,
             )
         )
-    
+    if not log_file:
+        log_file = "orca.out"
     # cmd = f'{set_env}; {orca_cmd} input.inp "--bind-to-core" | tee orca.out' # "--oversubscribe" "--use-hwthread-cpus"
-    cmd = f'/bin/bash -c "{set_env} {orca_cmd} input.inp "--use-hwthread-cpus" | tee orca.out"'
+    cmd = f'/bin/bash -c "{set_env} {orca_cmd} input.inp "--use-hwthread-cpus" | tee {log_file}"'
     _logger.debug(f"Running Orca as: {cmd}")
-
     # Run Orca, capture an log output
     generator = stream(cmd, cwd=str(work_dir))
     lines = []
     for line in generator:
         lines.append(line)
         _logger.debug(line.rstrip("\n"))
+    # try copying savefiles
+    if save_files:
+        for f in save_files:
+            try:
+                shutil.copy(work_dir / f, save_dir / f)
+            except Exception:
+                _logger.error(f"Failed to copy {f} to {save_dir}")
 
+    # read results
     if normal_termination(lines) or force:
         clean_option_keys = [k.lower() for k in options.keys()]
         _logger.debug("Orca calculation terminated normally.")
-        properties = ["electronic_energy"]
+        properties = ["electronic_energy", "timings"]
         additional_properties = []
         if "cosmors" in clean_option_keys:
             properties.append("cosmors_dgsolv")
@@ -117,6 +152,7 @@ def orca_calculate(
         if any(p in clean_option_keys for p in ("freq", "numfreq")):
             properties.append("vibs")
             properties.append("gibbs_energy")
+            properties.append("enthalpy")
             if not any(p in clean_option_keys for p in ("xtb1", "xtb2")):
                 properties.append("detailed_contributions")
         # ---------- results from additional files --------------
@@ -136,14 +172,37 @@ def orca_calculate(
             copy.deepcopy(lines), work_dir, additional_properties
         )
         results.update(additional_results)
+        #  read the json
+        try:
+            with open(work_dir / "input.property.json", "r") as f:
+                results["json"] = json.load(f)
+        except FileNotFoundError:
+            _logger.warning("File 'input.property.json' not found")
     else:
         _logger.warning("Orca calculation did not terminate normally.")
         _logger.info("\n".join(lines))
         results = {"normal_termination": False, "log": "\n".join(lines)}
+
+    if read_files:
+        for f in read_files:
+            with open(work_dir / f, "r") as _f:
+                try:
+                    results[f] = _f.read()
+                except FileNotFoundError:
+                    _logger.warning(f"File {f} not found")
     if calc_dir:
         results["calc_dir"] = str(work_dir)
     else:
         work_dir.cleanup()
+
+    time = datetime.now()
+    results["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    results["timestamp"] = time.timestamp()
+    results["atoms"] = atoms
+    results["coords"] = coords
+    results["charge"] = charge
+    results["multiplicity"] = multiplicity
+    results["options"] = options
     return results
 
 
@@ -213,6 +272,23 @@ def read_final_sp_energy(lines: List[str]) -> float:
         if "FINAL SINGLE POINT ENERGY" in line:
             return float(line.split()[-1])
     return None
+
+
+def read_timings(lines: List[str]) -> dict:
+    pattern = r"(\d+) days (\d+) hours (\d+) minutes (\d+) seconds (\d+) msec"
+    for line in reversed(lines):
+        if "TOTAL RUN TIME" in line:
+            match = re.search(pattern, line.strip())
+            if match:
+                runtime_data = {
+                    "days": int(match.group(1)),
+                    "hours": int(match.group(2)),
+                    "minutes": int(match.group(3)),
+                    "seconds": int(match.group(4)),
+                    "milliseconds": int(match.group(5)),
+                }
+                break
+    return runtime_data
 
 
 def read_opt_structure(lines: List[str]) -> tuple:
@@ -369,6 +445,12 @@ def read_gibbs_energy(lines: List[str]) -> float:
             return float(line.split()[-2])
 
 
+def read_enthalpy(lines: List[str]) -> float:
+    for line in reversed(lines):
+        if "Total Enthalpy" in line:
+            return float(line.split()[-2])
+
+
 def get_detailed_contributions(lines: List[str]) -> dict:
     for i, l in enumerate(lines):
         if "Zero point energy" in l:
@@ -391,17 +473,17 @@ def get_detailed_contributions(lines: List[str]) -> dict:
             translational_entropy = float(l.split()[-4])
         elif "G-E(el)" in l:
             gibbs_correction = float(l.split()[-4])
-        elif "rotational entropy values for sn=" in l:
-            sn_idx = i
-            sn_nums = int(l.split(",")[-1].split()[0].rstrip(":"))
-            if lines[sn_idx + 1] == "\n":
-                # in orca6 the sn_idx line is followed by an empty line
-                sn_idx += 1
+    #     elif "rotational entropy values for sn=" in l:
+    #         sn_idx = i
+    #         sn_nums = int(l.split(",")[-1].split()[0].rstrip(":"))
+    #         if lines[sn_idx + 1] == "\n":
+    #             # in orca6 the sn_idx line is followed by an empty line
+    #             sn_idx += 1
 
-    sn_rot_entropy = {}
-    if "sn_idx" in locals():
-        for i, l in enumerate(lines[sn_idx + 2 : sn_idx + 2 + sn_nums]):
-            sn_rot_entropy[i] = float(l.split()[-4])
+    # sn_rot_entropy = {}
+    # if "sn_idx" in locals():
+    #     for i, l in enumerate(lines[sn_idx + 2 : sn_idx + 2 + sn_nums]):
+    #         sn_rot_entropy[i] = float(l.split()[-4])
 
     # format into dict
     detailed_contributions = {
@@ -415,7 +497,7 @@ def get_detailed_contributions(lines: List[str]) -> dict:
         "rotational_entropy": rotational_entropy,
         "translation_entropy": translational_entropy,
         "gibbs_correction": gibbs_correction,
-        "sn_rot_entropy": sn_rot_entropy,
+        # "sn_rot_entropy": sn_rot_entropy,
     }
 
     return detailed_contributions
@@ -563,6 +645,7 @@ def get_orca_results(
         "electronic_energy",
         "mulliken_charges",
         "loewdin_charges",
+        "timings",
     ],
 ) -> dict:
     """Read results from ORCA output.
@@ -582,11 +665,13 @@ def get_orca_results(
         "opt_structure": read_opt_structure,  # optional
         "vibs": read_vibrations,  # optional
         "gibbs_energy": read_gibbs_energy,  # optional
+        "enthalpy": read_enthalpy,  # optional
         "mulliken_charges": read_mulliken_charges,  # always read this
         "loewdin_charges": read_loewdin_charges,  # always read this
         "hirshfeld_charges": read_hirshfeld_charges,  # optional
         "detailed_contributions": get_detailed_contributions,  # optional
         "cosmors_dgsolv": read_cosmors,  # optional
+        "timings": read_timings,  # always read this
     }
 
     if not normal_termination(lines):

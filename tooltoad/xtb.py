@@ -1,11 +1,14 @@
+import json
 import logging
 import os
 import re
+from dataclasses import dataclass, fields
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
-from tooltoad.chemutils import xyz2ac
+from tooltoad.chemutils import read_multi_xyz, xyz2ac
 from tooltoad.utils import (
     STANDARD_PROPERTIES,
     WorkingDir,
@@ -13,7 +16,7 @@ from tooltoad.utils import (
     stream,
 )
 
-_logger = logging.getLogger("xtb")
+_logger = logging.getLogger(__name__)
 
 
 def xtb_calculate(
@@ -29,6 +32,7 @@ def xtb_calculate(
     calc_dir: None | str = None,
     xtb_cmd: str = "xtb",
     force: bool = False,
+    data2file: None | dict = None,
 ) -> dict:
     """Run xTB calculation.
 
@@ -54,6 +58,11 @@ def xtb_calculate(
     work_dir = WorkingDir(root=scr, name=calc_dir)
     xyz_file = write_xyz(atoms, coords, work_dir)
 
+    if data2file:
+        for filename, data in data2file.items():
+            with open(work_dir / filename, "w") as f:
+                f.write(data)
+
     # clean xtb method option
     # for k, value in options.items():
     #     if "gfn" in k.lower():
@@ -77,18 +86,18 @@ def xtb_calculate(
         with open(fpath, "w") as inp:
             inp.write(detailed_input_str)
         cmd += f"--input {fpath.name} "
-
+    _logger.debug(f"Running xTB with command: {cmd}")
     lines = run_xtb((cmd, xyz_file))
-    if not normal_termination(lines) and not force:
+    results = normal_termination(lines)
+    if not results["normal_termination"] and not force:
         _logger.warning("xTB did not terminate normally")
         _logger.info("".join(lines))
-        results = {"normal_termination": False, "log": "".join(lines)}
+        results["log"] = "".join(lines)
         if calc_dir:
             results["calc_dir"] = str(work_dir)
         else:
             work_dir.cleanup()
         return results
-
     # read results
     results = read_xtb_results(lines)
     if "hess" in options:
@@ -104,22 +113,38 @@ def xtb_calculate(
         results["mulliken"] = read_mulliken(work_dir / "charges")
     results["atoms"] = atoms
     results["coords"] = coords
+    results["charge"] = charge
+    results["multiplicity"] = multiplicity
+    results["options"] = options
     if "opt" in options:
         results["opt_coords"] = read_opt_structure(lines)[-1]
     if "ohess" in options:
         results.update(read_thermodynamics(lines))
         results["vibs"] = read_vibrations(lines)
         results["opt_coords"] = read_opt_structure(lines)[-1]
+    if any(s in options for s in ["md", "metadyn", "omd"]):
+        results["traj"] = read_meta_md(work_dir / "xtb.trj")
+        results.update(md_normal_termination(lines))
+        results.update(read_mdrestart(work_dir / "mdrestart"))
     if detailed_input or detailed_input_str:
         if any(
             "scan" in x for x in (detailed_input, detailed_input_str) if x is not None
         ):
             results["scan"] = read_scan(work_dir / "xtbscan.log")
+        if "wall" in detailed_input_str and "sphere" in detailed_input_str:
+            results["cavity_radius"] = read_cavity_radius(lines)
+    if "json" in options:
+        with open(work_dir / "xtbout.json", "r") as f:
+            json_data = json.load(f)
+        results["json"] = json_data
     if calc_dir:
         results["calc_dir"] = str(work_dir)
     else:
         work_dir.cleanup()
 
+    time = datetime.now()
+    results["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    results["timestamp"] = time.timestamp()
     return results
 
 
@@ -181,18 +206,44 @@ def run_xtb(args: tuple[str]) -> list[str]:
     return lines
 
 
-def normal_termination(lines: list[str], strict: bool = False) -> bool:
-    """Check if xTB terminated normally."""
-    first_check = 0
-    for line in reversed(lines):
-        if line.strip().startswith("normal termination"):
-            first_check = 1
-            if not strict:
-                return first_check
-        if "FAILED TO" in line:
-            if strict:
-                return max([0, first_check - 0.5])
-    return first_check
+def normal_termination(lines: list[str]) -> dict:
+    messages = {}
+    normal_termination = False
+    warnings = []
+    errors = []
+
+    i = 0  # Index to track the current position in the list
+    while i < len(lines):
+        line = lines[i]
+        if "terminated normally" in line:
+            normal_termination = True
+        if "normal termination" in line:
+            normal_termination = True
+        if "created    .xtboptok" in line:
+            normal_termination = True
+        if "[WARNING]" in line:
+            while "###" not in line:
+                warnings.append(line)
+                i += 1
+                if i >= len(lines):
+                    break
+                line = lines[i]
+        elif "[ERROR]" in line:
+            while "###" not in line:
+                errors.append(line)
+                i += 1
+                if i >= len(lines):
+                    break
+                line = lines[i]
+        i += 1  # Move to the next line after processing
+
+    if warnings:
+        messages["warnings"] = warnings
+    if errors:
+        messages["errors"] = errors
+        messages["normal_termination"] = False
+    messages["normal_termination"] = normal_termination
+    return messages
 
 
 def read_opt_structure(lines: list[str]) -> tuple[list[str], list[list[float]]]:
@@ -337,27 +388,66 @@ def read_scan(scan_file) -> dict:
     return {"pes": pes, "traj": traj}
 
 
+def read_meta_md(traj_file) -> dict:
+    _, coords, energies = read_multi_xyz(
+        traj_file, lambda x: float(x.strip().split()[1])
+    )
+    return {"coords": coords, "energies": energies}
+
+
+def read_mdrestart(mdrestart_file):
+    with open(mdrestart_file, "r") as f:
+        mdrestart = f.read()
+    return {"mdrestart": mdrestart}
+
+
+def md_normal_termination(lines: list[str]) -> bool:
+    """Check if MD terminated normally."""
+    checks = {"normal_termination_md": False, "md_stable": True}
+    for line in reversed(lines):
+        if line.strip().startswith("normal exit of md()"):
+            checks["normal_termination_md"] = True
+        elif line.strip().startswith("MD is unstable, emergency exit"):
+            checks["md_stable"] = False
+    return checks
+
+
+def read_cavity_radius(lines: list[str]) -> float:
+    """Read cavity radius from xTB output."""
+    for line in reversed(lines):
+        if "wallpotenial with radius" in line:
+            return float(line.strip().split()[-2])
+    return None
+
+
 def read_xtb_results(lines: list[str]) -> dict:
     """Read basic results from xTB log."""
 
-    def _get_runtime(lines: list[str]) -> float:
-        """Reads xTB runtime in seconds."""
-        _, _, days, _, hours, _, minutes, _, seconds, _ = line.strip().split()
-        total_seconds = (
-            float(seconds)
-            + 60 * float(minutes)
-            + 360 * float(hours)
-            + 86400 * float(days)
+    def parse_time(line):
+        pattern = (
+            r"\* wall-time:\s+(\d+)\s+d,\s+(\d+)\s+h,\s+(\d+)\s+min,\s+([\d\.]+)\s+sec"
         )
-        return total_seconds
+        match = re.search(pattern, line)
 
-    property_start_idx, dipole_idx, quadrupole_idx, runtime_idx, polarizability_idx = (
-        np.nan,
-        np.nan,
-        np.nan,
-        np.nan,
-        np.nan,
-    )
+        if match:
+            return {
+                "days": int(match.group(1)),
+                "hours": int(match.group(2)),
+                "minutes": int(match.group(3)),
+                "seconds": float(match.group(4)),
+            }
+        else:
+            return None
+
+    (
+        property_start_idx,
+        dipole_idx,
+        quadrupole_idx,
+        runtime_idx,
+        polarizability_idx,
+        wall_time,
+    ) = (np.nan, np.nan, np.nan, np.nan, np.nan, None)
+    gfn_offset = 0
     properties = {}
     for i, line in enumerate(lines):
         line = line.strip()
@@ -369,6 +459,9 @@ def read_xtb_results(lines: list[str]) -> dict:
             property_start_idx = i
         elif "molecular dipole" in line:
             dipole_idx = i
+            # hack for gfn-ff calc
+            if "gfnff" in programm_call:
+                gfn_offset = 1
         elif "molecular quadrupole" in line:
             quadrupole_idx = i
         elif "total:" in line:
@@ -391,22 +484,14 @@ def read_xtb_results(lines: list[str]) -> dict:
             polarizability = float(line.split()[-1])
 
         # read dipole moment
-        if i > (dipole_idx + 2):
-            parts = line.split()[1:]
-            if len(parts) == 4:
-                dx, dy, dz, norm = map(float, parts)
-                dipole_vec = np.array([dx, dy, dz])
-                dipole_norm = norm
-            dipole_idx = np.nan        
-        # if i > (dipole_idx + 2):
-        #     dip_x, dip_y, dip_z, dip_norm = [
-        #         float(x) for x in line.split()[1:]
-        #     ] 
-        #     # norm is in Debye
-        #     dipole_vec = np.array(
-        #         [dip_x, dip_y, dip_z]
-        #     )  # in a.u. (*2.5412 ot convert to Debye)
-        #     dipole_idx = np.nan
+        if i > (dipole_idx + 2 - gfn_offset):
+            dip_x, dip_y, dip_z, dip_norm = [
+                float(x) for x in line.split()[1 + gfn_offset :]
+            ]  # norm is in Debye
+            dipole_vec = np.array(
+                [dip_x, dip_y, dip_z]
+            )  # in a.u. (*2.5412 ot convert to Debye)
+            dipole_idx = np.nan
 
         # read quadrupole moment
         if i > (quadrupole_idx + 3):
@@ -419,20 +504,14 @@ def read_xtb_results(lines: list[str]) -> dict:
             quadrupole_idx = np.nan
 
         # read runtimes
-        wall_time, cpu_time = np.nan, np.nan
-        if i > runtime_idx:
-            if i == (runtime_idx + 1):
-                wall_time = _get_runtime(line)
-            else:
-                cpu_time = _get_runtime(line)
-                runtime_idx = np.nan
+        if i == (runtime_idx + 1):
+            wall_time = parse_time(line)
 
     results = {
         "normal_termination": True,
         "programm_call": programm_call,
         "programm_version": xtb_version,
-        "wall_time": wall_time,
-        "cpu_time": cpu_time,
+        "timings": wall_time,
     }
 
     if not np.isnan(polarizability_idx):
@@ -449,6 +528,142 @@ def read_xtb_results(lines: list[str]) -> dict:
         if key in results:
             results[value] = results[key]
     return results
+
+
+# --------------------- Detailed Input Options -------------------------
+
+
+class BaseOptions:
+    def __str__(self):
+        assert "Options" in self.__class__.__name__
+        name = self.__class__.__name__.replace("Options", "").lower()
+        lines = []
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if value is None:
+                continue
+            if isinstance(value, bool):  # Convert boolean to lowercase string
+                value = str(value).lower()
+            elif isinstance(value, float):  # Format floats with consistent precision
+                value = f"{value:.4f}"
+            elif isinstance(value, list):
+                value = ",".join(map(str, value))
+            delimiter = ":" if "," in str(value) else "="
+            lines.append(f"   {field.name}{delimiter}{value}")
+        return f"${name}\n" + "\n".join(lines) + "\n$end"
+
+
+@dataclass
+class MDOptions(BaseOptions):
+    temp: float = 300
+    time: float = 10.0  # ps
+    dump: float = 10.0  # every x step, dumptrj
+    sdump: None | float = 250  # every x step, dumpcoord
+    step: float = 0.4  # fs
+    velo: bool = False
+    shake: int = 0
+    hmass: int = 2
+    sccacc: float = 2.0
+    nvt: bool = True
+    restart: bool = False
+
+
+@dataclass
+class MetaDynOptions(BaseOptions):
+    save: int = 250  # maximum number of structures to consider for bias potential
+    kpush: float = 0.075
+    alp: float = 0.3
+    coord: None | str = None
+    atoms: None | str = None  # must be formatted as "1,2,3" or "1-3,5"
+    # undocumented options
+    # https://github.com/grimme-lab/xtb/blob/main/src/set_module.f90#L2541
+    static: None | bool = False
+    ramp: None | float = 0.03
+    bias_input: None | str = None
+
+
+@dataclass
+class WallOptions(BaseOptions):
+    potential: str = "logfermi"
+    sphere: str = "auto, all"
+    autoscale: None | float = None
+    beta: None | float = 10.0
+    temp: None | float = 6000.0
+    ellipsoid: None | str = None
+    # TODO: add more options
+
+
+@dataclass
+class SCCOptions(BaseOptions):
+    temp: None | float = 6000.0
+
+
+# --------------------- Detailed Input Options -------------------------
+
+
+class BaseOptions:
+    def __str__(self):
+        assert "Options" in self.__class__.__name__
+        name = self.__class__.__name__.replace("Options", "").lower()
+        lines = []
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if value is None:
+                continue
+            if isinstance(value, bool):  # Convert boolean to lowercase string
+                value = str(value).lower()
+            elif isinstance(value, float):  # Format floats with consistent precision
+                value = f"{value:.4f}"
+            elif isinstance(value, list):
+                value = ",".join(map(str, value))
+            delimiter = ":" if "," in str(value) else "="
+            lines.append(f"   {field.name}{delimiter}{value}")
+        return f"${name}\n" + "\n".join(lines) + "\n$end"
+
+
+@dataclass
+class MDOptions(BaseOptions):
+    temp: float = 300
+    time: float = 10.0  # ps
+    dump: float = 10.0  # every x step, dumptrj
+    sdump: None | float = 250  # every x step, dumpcoord
+    step: float = 0.4  # fs
+    velo: bool = False
+    shake: int = 0
+    hmass: int = 2
+    sccacc: float = 2.0
+    nvt: bool = True
+    restart: bool = False
+
+
+@dataclass
+class MetaDynOptions(BaseOptions):
+    save: int = 250  # maximum number of structures to consider for bias potential
+    kpush: float = 0.075
+    alp: float = 0.3
+    coord: None | str = None
+    atoms: None | str = None  # must be formatted as "1,2,3" or "1-3,5"
+    # undocumented options
+    # https://github.com/grimme-lab/xtb/blob/main/src/set_module.f90#L2541
+    static: None | bool = False
+    ramp: None | float = 0.03
+    bias_input: None | str = None
+
+
+@dataclass
+class WallOptions(BaseOptions):
+    potential: str = "logfermi"
+    sphere: str = "auto, all"
+    autoscale: None | float = None
+    beta: None | float = 10.0
+    temp: None | float = 6000.0
+    ellipsoid: None | str = None
+    # TODO: add more options
+
+
+@dataclass
+class SCCOptions(BaseOptions):
+    temp: None | float = 6000.0
 
 
 def mock_xtb_calculate(

@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime
 
 import numpy as np
 from joblib import Parallel, delayed
@@ -17,6 +18,7 @@ def run_crest(
     atoms: list[str],
     coords: list[list[float]],
     charge: int = 0,
+    multiplicity: int = 1,
     n_cores: int = 1,
     calc_dir: None | str = None,
     scr: str = ".",
@@ -38,7 +40,7 @@ def run_crest(
         f.write(ac2xyz(atoms, coords))
 
     # crest CREST command
-    cmd = f"crest input.xyz --chrg {charge} --T {n_cores} "
+    cmd = f"crest input.xyz --chrg {charge} --uhf {multiplicity-1} --T {n_cores} "
     for key, value in crest_kwargs.items():
         if value is None or value is True:
             cmd += f"--{key} "
@@ -86,10 +88,15 @@ def run_crest(
     rel_energies = [hartree2kcalmol(e - min(energies)) for e in energies]
     if not keep_files and not calc_dir:
         wd.cleanup()
-    return [
+
+    results = [
         {"atoms": atoms, "coords": c, "xtb_energy": e}
         for c, e in zip(coords, rel_energies)
     ]
+    time = datetime.now()
+    results["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    results["timestamp"] = time.timestamp()
+    return results
 
 
 def refine_with_orca(
