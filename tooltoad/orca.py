@@ -127,12 +127,15 @@ End"""
         lines.append(line)
         _logger.debug(line.rstrip("\n"))
     # try copying savefiles
+
     if save_files:
-        for f in save_files:
-            try:
-                shutil.copy(work_dir / f, save_dir / f)
-            except Exception:
-                _logger.error(f"Failed to copy {f} to {save_dir}")
+        work_path = work_dir.dir  
+        for pattern in save_files:
+            for src in work_path.glob(pattern):
+                try:
+                    shutil.copy(src, save_dir / src.name)
+                except Exception:
+                    _logger.error(f"Failed to copy {src} to {save_dir}")
 
     # read results
     if normal_termination(lines) or force:
@@ -692,15 +695,24 @@ def get_orca_results(
 
 
 def mock_orca_calculate(
-    atoms,
-    coords,
-    charge=0,
-    multiplicity=1,
-    options=None,
-    calc_dir=None,
-    memory=4,
-    n_cores=1,
-    xtra_inp_str=None
+    atoms: List[str],
+    coords: List[list],
+    charge: int = 0,
+    multiplicity: int = 1,
+    options: dict = {},
+    xtra_inp_str: str = None,
+    scr: str = ".",
+    n_cores: int = 1,
+    memory: int = 8,
+    calc_dir: str = None,
+    orca_cmd: str = ORCA_CMD,
+    set_env: str = SET_ENV,
+    force: bool = False,
+    log_file: str | None = None,
+    read_files: list | None = None,
+    save_files: list | None = None,
+    save_dir: str | None = None,
+    data2file: None | dict = None,
 ):
     import time, os, random
     import numpy as np

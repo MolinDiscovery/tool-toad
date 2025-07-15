@@ -599,15 +599,19 @@ class SCCOptions(BaseOptions):
 
 
 def mock_xtb_calculate(
-    atoms,
-    coords,
-    charge=0,
-    multiplicity=1,
-    options=None,
-    detailed_input_str=None,
-    calc_dir=None,
-    n_cores=1,
-    memory=4,
+    atoms: list[str],
+    coords: list[list],
+    charge: int = 0,
+    multiplicity: int = 1,
+    options: dict = {},
+    scr: str = ".",
+    n_cores: int = 1,
+    detailed_input: None | dict = None,
+    detailed_input_str: None | str = None,
+    calc_dir: None | str = None,
+    xtb_cmd: str = "xtb",
+    force: bool = False,
+    data2file: None | dict = None,
 ):
     import time, random
     import numpy as np
