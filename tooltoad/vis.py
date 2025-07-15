@@ -582,7 +582,7 @@ def MolTo3DGrid(
     show_confs: bool = True,
     background_color='white',
     export_HTML='none',
-    cell_size=(300, 300),
+    cell_size=(400, 400),
     columns=3,
     linked=False,
     kekulize=True,
