@@ -356,6 +356,7 @@ def show_vibs(
     numFrames: int = 20,
     amplitude: float = 1.0,
     transparent: bool = True,
+    fps: float | None = None
 ):
     """Show normal mode vibration."""
     input = results
@@ -365,6 +366,11 @@ def show_vibs(
     atoms = results["atoms"]
     opt_coords = results["opt_coords"]
     xyz = ac2xyz(atoms, opt_coords)
+
+    if fps is None:
+        interval_ms = 50
+    else:
+        interval_ms = max(1, int(1000.0 / fps))
 
     p = py3Dmol.view(width=width, height=height)
     p.addModel(xyz, "xyz")
@@ -382,7 +388,7 @@ def show_vibs(
         )
     p.mapAtomProperties(propmap)
     p.vibrate(numFrames, amplitude, True)
-    p.animate({"loop": "backAndForth", "interval": 1, "reps": 0})
+    p.animate({"loop": "backAndForth", "interval": interval_ms, "reps": 0})
     p.setStyle({"sphere": {"radius": 0.4}, "stick": {}})
     p.setBackgroundColor("0xeeeeee", int(~transparent))
     p.zoomTo()
