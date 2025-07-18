@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
+import shlex
+import subprocess
 import numpy as np
 
 from tooltoad.chemutils import hartree2kcalmol, read_multi_xyz, xyz2ac
@@ -118,85 +120,129 @@ End"""
     if not log_file:
         log_file = "orca.out"
     # cmd = f'{set_env}; {orca_cmd} input.inp "--bind-to-core" | tee orca.out' # "--oversubscribe" "--use-hwthread-cpus"
-    cmd = f'/bin/bash -c "{set_env} {orca_cmd} input.inp "--use-hwthread-cpus" | tee {log_file}"'
-    _logger.debug(f"Running Orca as: {cmd}")
-    # Run Orca, capture an log output
-    generator = stream(cmd, cwd=str(work_dir))
-    lines = []
-    for line in generator:
-        lines.append(line)
-        _logger.debug(line.rstrip("\n"))
-    # try copying savefiles
+    # cmd = f'/bin/bash -c "{set_env} {orca_cmd} input.inp "--use-hwthread-cpus" | tee {log_file}"'
 
-    if save_files:
-        work_path = work_dir.dir  
-        for pattern in save_files:
-            for src in work_path.glob(pattern):
-                try:
-                    shutil.copy(src, save_dir / src.name)
-                except Exception:
-                    _logger.error(f"Failed to copy {src} to {save_dir}")
+    # _logger.debug(f"Running Orca as: {cmd}")
 
-    # read results
-    if normal_termination(lines) or force:
-        clean_option_keys = [k.lower() for k in options.keys()]
-        _logger.debug("Orca calculation terminated normally.")
-        properties = ["electronic_energy", "timings"]
-        additional_properties = []
-        if "cosmors" in clean_option_keys:
-            properties.append("cosmors_dgsolv")
-        if "hirshfeld" in clean_option_keys:
-            properties.append("hirshfeld_charges")
-        if any(
-            p in clean_option_keys for p in ("opt", "optts", "tightopt", "verytightopt")
-        ):
-            properties.append("opt_structure")
-            additional_properties.append("traj")
-        if any(p in clean_option_keys for p in ("freq", "numfreq")):
-            properties.append("vibs")
-            properties.append("gibbs_energy")
-            properties.append("enthalpy")
-            if not any(p in clean_option_keys for p in ("xtb1", "xtb2")):
-                properties.append("detailed_contributions")
-        # ---------- results from additional files --------------
-        if "irc" in clean_option_keys:
-            additional_properties.append("irc")
-        if "goat" in clean_option_keys:
-            additional_properties.append("goat")
-        if "goat-react" in clean_option_keys:
-            additional_properties.append("goat")
-            additional_properties.append("goat-react")
-        # ---------- check for options in xtra_inp_str ----------
-        if xtra_inp_str:
-            if "scan" in xtra_inp_str.lower():
-                additional_properties.append("scan")
-        results = get_orca_results(copy.deepcopy(lines), properties=properties)
-        additional_results = get_additional_results(
-            copy.deepcopy(lines), work_dir, additional_properties
-        )
-        results.update(additional_results)
-        #  read the json
-        try:
-            with open(work_dir / "input.property.json", "r") as f:
-                results["json"] = json.load(f)
-        except FileNotFoundError:
-            _logger.warning("File 'input.property.json' not found")
-    else:
-        _logger.warning("Orca calculation did not terminate normally.")
-        _logger.info("\n".join(lines))
-        results = {"normal_termination": False, "log": "\n".join(lines)}
+    results = {}
+    try:
+        # Run Orca, capture an log output
+        env = os.environ.copy()
+        env.update({
+            "XTBEXE":        XTB_EXE,
+            "XTBPATH":       XTBPATH,
+            "PATH":          f"{ORCA_DIR}:{OPEN_MPI_DIR}/bin:" + env["PATH"],
+            "LD_LIBRARY_PATH": f"{OPEN_MPI_DIR}/lib:" + env.get("LD_LIBRARY_PATH", ""),
+            "DYLD_LIBRARY_PATH": f"{OPEN_MPI_DIR}/lib:" + env.get("DYLD_LIBRARY_PATH",""),
+        })
 
-    if read_files:
-        for f in read_files:
-            with open(work_dir / f, "r") as _f:
-                try:
-                    results[f] = _f.read()
-                except FileNotFoundError:
-                    _logger.warning(f"File {f} not found")
-    if calc_dir:
-        results["calc_dir"] = str(work_dir)
-    else:
-        work_dir.cleanup()
+        scratch_log = work_dir / "orca.out"
+        if save_files:
+            mirror_log = Path(save_dir) / "orca.out"
+            mirror_log.parent.mkdir(parents=True, exist_ok=True)
+            mf = open(mirror_log, "wb")
+        else:
+            mf = None
+
+        # 3) invoke ORCA once, tee’ing both streams
+        with open(scratch_log, "wb") as sf:
+            p = subprocess.Popen(
+                [orca_cmd, "input.inp", "--use-hwthread-cpus"],
+                cwd=str(work_dir),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            for chunk in p.stdout:
+                sf.write(chunk)
+                if mf:
+                    mf.write(chunk)
+            ret = p.wait()
+
+        if mf:
+            mf.close()
+
+        # 4) check exit code
+        if ret != 0 and not force:
+            _logger.warning(f"ORCA exited with status {ret}")
+
+        # 5) parse the log you just wrote
+        lines = scratch_log.read_text().splitlines()
+
+        # read results
+        if normal_termination(lines) or force:
+            clean_option_keys = [k.lower() for k in options.keys()]
+            _logger.debug("Orca calculation terminated normally.")
+            properties = ["electronic_energy", "timings"]
+            additional_properties = []
+            if "cosmors" in clean_option_keys:
+                properties.append("cosmors_dgsolv")
+            if "hirshfeld" in clean_option_keys:
+                properties.append("hirshfeld_charges")
+            if any(
+                p in clean_option_keys for p in ("opt", "optts", "tightopt", "verytightopt")
+            ):
+                properties.append("opt_structure")
+                additional_properties.append("traj")
+            if any(p in clean_option_keys for p in ("freq", "numfreq")):
+                properties.append("vibs")
+                properties.append("gibbs_energy")
+                properties.append("enthalpy")
+                if not any(p in clean_option_keys for p in ("xtb1", "xtb2")):
+                    properties.append("detailed_contributions")
+            # ---------- results from additional files --------------
+            if "irc" in clean_option_keys:
+                additional_properties.append("irc")
+            if "goat" in clean_option_keys:
+                additional_properties.append("goat")
+            if "goat-react" in clean_option_keys:
+                additional_properties.append("goat")
+                additional_properties.append("goat-react")
+            # ---------- check for options in xtra_inp_str ----------
+            if xtra_inp_str:
+                if "scan" in xtra_inp_str.lower():
+                    additional_properties.append("scan")
+            results = get_orca_results(copy.deepcopy(lines), properties=properties)
+            additional_results = get_additional_results(
+                copy.deepcopy(lines), work_dir, additional_properties
+            )
+            results.update(additional_results)
+            #  read the json
+            try:
+                with open(work_dir / "input.property.json", "r") as f:
+                    results["json"] = json.load(f)
+            except FileNotFoundError:
+                _logger.warning("File 'input.property.json' not found")
+        else:
+            _logger.warning("Orca calculation did not terminate normally.")
+            _logger.info("\n".join(lines))
+            results = {"normal_termination": False, "log": "\n".join(lines)}
+
+        if read_files:
+            for f in read_files:
+                with open(work_dir / f, "r") as _f:
+                    try:
+                        results[f] = _f.read()
+                    except FileNotFoundError:
+                        _logger.warning(f"File {f} not found")
+
+    except Exception as e:
+        print(f"orca_calculate failed: {type(e).__name__}: {e}")
+        _logger.error("orca_calculate crashed", exc_info=True)
+        raise
+
+    finally:
+        if save_files and save_dir:
+            for pattern in save_files:
+                for src in work_dir.dir.glob(pattern):
+                    try:
+                        shutil.copy(src, Path(save_dir) / src.name)
+                    except Exception as e:
+                        _logger.error(f"Failed to copy {src}: {e}")
+        if not calc_dir:
+            work_dir.cleanup()
+        else:
+            results["calc_dir"] = str(work_dir)
 
     time = datetime.now()
     results["time"] = time.strftime("%Y-%m-%d %H:%M:%S")

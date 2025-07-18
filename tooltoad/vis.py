@@ -595,6 +595,7 @@ def MolTo3DGrid(
     legends=None,
     highlightAtoms=None,
     bonds_to_remove=None,
+    show_charges=True,
 ):
     """
     Displays either:
@@ -636,6 +637,8 @@ def MolTo3DGrid(
         bonds_to_remove (list of tuple of int):
             Pairs of atom indices whose bond should be removed before display.
             e.g. [(10, 41), (10, 12), (11, 41)]
+        show_charges (bool):
+            Show charges in 3D space.
 
     Returns:
         None
@@ -736,7 +739,7 @@ def MolTo3DGrid(
         viewer.setStyle({}, {'stick': {}, 'sphere': {'radius': 0.3}}, viewer=(row, col))
         viewer.zoomTo(viewer=(row, col))
 
-        # Legend
+        # Legend<
         label = legends[m_idx]
         if conf_counts[m_idx] > 1:
             label += f" c{conf_id+1}"
@@ -756,6 +759,43 @@ def MolTo3DGrid(
                 viewer.addLabel(text,
                     {'position':{'x':pos.x,'y':pos.y,'z':pos.z}, 'fontColor':'black', 'backgroundColor':'white',
                      'borderThickness':1, 'fontSize':12},
+                    viewer=(row, col)
+                )
+
+        if show_charges:
+            conf = mol.GetConformer(conf_id)
+            for atom in mol.GetAtoms():
+                fc = atom.GetFormalCharge()
+                if fc == 0: continue
+
+                i = atom.GetIdx()
+                pos = conf.GetAtomPosition(i)
+                atom_pos = {'x': pos.x, 'y': pos.y, 'z': pos.z}
+                label_pos = {'x': pos.x, 'y': pos.y, 'z': pos.z}
+
+                color = 'red' if fc>0 else 'blue'
+                sign  = f"{abs(fc)}+" if fc>0 else f"{abs(fc)}-"
+
+                viewer.addCylinder({
+                    'start': atom_pos,
+                    'end':   label_pos,
+                    'radius': 0.05,
+                    'color': color,
+                    'fromCap': False,
+                    'toCap': False
+                }, viewer=(row, col))
+
+                viewer.addLabel(
+                    sign,
+                    {
+                    'position':     label_pos,
+                    'inFront':      True,
+                    'fontSize':     16,
+                    'fontColor':    color,
+                    'fontWeight':   'bold',
+                    'backgroundColor': 'rgba(255,255,255,0)',
+                    'backgroundOpacity': 0.6,
+                    },
                     viewer=(row, col)
                 )
         
