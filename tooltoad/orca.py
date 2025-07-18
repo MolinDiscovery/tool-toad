@@ -137,7 +137,6 @@ End"""
         })
 
         scratch_log = work_dir / "orca.out"
-        print(f"[DEBUG] will write scratch log to: {scratch_log!r}")
         if save_files:
             mirror_log = Path(save_dir) / "orca.out"
             mirror_log.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +145,6 @@ End"""
             mf = None
 
         # 3) invoke ORCA once, tee’ing both streams
-        print(f"[DEBUG] invoking ORCA in {work_dir.dir!r}")
         with open(scratch_log, "wb") as sf:
             p = subprocess.Popen(
                 [orca_cmd, "input.inp", "--use-hwthread-cpus"],
@@ -161,9 +159,6 @@ End"""
                     mf.write(chunk)
             ret = p.wait()
 
-
-        print(f"[DEBUG] ORCA exited with code {ret}")
-        print(f"[DEBUG] scratch_log exists? {scratch_log.exists()}, size={scratch_log.stat().st_size}")
         if mf:
             mf.close()
             print(f"[DEBUG] mirror_log exists? {mirror_log.exists()}, size={mirror_log.stat().st_size}")
