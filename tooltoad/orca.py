@@ -120,55 +120,18 @@ End"""
     if not log_file:
         log_file = "orca.out"
     # cmd = f'{set_env}; {orca_cmd} input.inp "--bind-to-core" | tee orca.out' # "--oversubscribe" "--use-hwthread-cpus"
-    # cmd = f'/bin/bash -c "{set_env} {orca_cmd} input.inp "--use-hwthread-cpus" | tee {log_file}"'
+    cmd = f'/bin/bash -c "{set_env} {orca_cmd} input.inp "--use-hwthread-cpus" | tee {log_file}"'
 
-    # _logger.debug(f"Running Orca as: {cmd}")
+    _logger.debug(f"Running Orca as: {cmd}")
 
     results = {}
     try:
-        # Run Orca, capture an log output
-        env = os.environ.copy()
-        env.update({
-            "XTBEXE":        XTB_EXE,
-            "XTBPATH":       XTBPATH,
-            "PATH":          f"{ORCA_DIR}:{OPEN_MPI_DIR}/bin:" + env["PATH"],
-            "LD_LIBRARY_PATH": f"{OPEN_MPI_DIR}/lib:" + env.get("LD_LIBRARY_PATH", ""),
-            "DYLD_LIBRARY_PATH": f"{OPEN_MPI_DIR}/lib:" + env.get("DYLD_LIBRARY_PATH",""),
-        })
+        generator = stream(cmd, cwd=str(work_dir))
 
-        scratch_log = work_dir / "orca.out"
-        if save_files:
-            mirror_log = Path(save_dir) / "orca.out"
-            mirror_log.parent.mkdir(parents=True, exist_ok=True)
-            mf = open(mirror_log, "wb")
-        else:
-            mf = None
-
-        # 3) invoke ORCA once, tee’ing both streams
-        with open(scratch_log, "wb") as sf:
-            p = subprocess.Popen(
-                [orca_cmd, "input.inp", "--use-hwthread-cpus"],
-                cwd=str(work_dir),
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            for chunk in p.stdout:
-                sf.write(chunk)
-                if mf:
-                    mf.write(chunk)
-            ret = p.wait()
-
-        if mf:
-            mf.close()
-            print(f"[DEBUG] mirror_log exists? {mirror_log.exists()}, size={mirror_log.stat().st_size}")
-
-        # 4) check exit code
-        if ret != 0 and not force:
-            _logger.warning(f"ORCA exited with status {ret}")
-
-        # 5) parse the log you just wrote
-        lines = scratch_log.read_text().splitlines()
+        lines = []
+        for line in generator:
+            lines.append(line)
+            _logger.debug(line.rstrip("\n"))
 
         # read results
         if normal_termination(lines) or force:
