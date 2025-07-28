@@ -5,7 +5,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import networkx as nx
 import numpy as np
@@ -826,9 +826,13 @@ def xyz2ac(xyzblock: str):
     return atoms, coords
 
 
-def ac2xyz(atoms: List[str], coords: List[list]):
+def ac2xyz(atoms: List[str], coords: List[list], comment: Optional[str] = None):
     """Converts atom symbols and coordinates to xyz string."""
-    xyz = f"{len(atoms)}\n\n"
+    xyz = f"{len(atoms)}\n"
+    if comment is not None:
+        xyz += f"{comment}\n"
+    else:
+        xyz += "\n"
     for atom, coord in zip(atoms, coords):
         xyz += f"{atom} {coord[0]:.8f} {coord[1]:.8f} {coord[2]:.8f}\n"
     return xyz
