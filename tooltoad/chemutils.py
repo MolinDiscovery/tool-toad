@@ -894,7 +894,7 @@ def ac2mol(
     return rdkit_mol
 
 
-def read_xyz(path: str, return_mol: bool = True, **xyz2mol_kwargs):
+def read_xyz_file(path: str, return_mol: bool = True, **xyz2mol_kwargs):
     """
     Loads .xyz files from a directory or a single file.
     By default returns RDKit Mol objects; if return_mol is False, returns (atoms, coords).
