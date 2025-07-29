@@ -894,6 +894,27 @@ def ac2mol(
     return rdkit_mol
 
 
+def read_xyz(path: str, return_mol: bool = True, **xyz2mol_kwargs):
+    """
+    Loads .xyz files from a directory or a single file.
+    By default returns RDKit Mol objects; if return_mol is False, returns (atoms, coords).
+    """
+    p = Path(path)
+    def _load(file_path):
+        xyzblock = file_path.read_text()
+        if return_mol:
+            return xyz2mol(xyzblock, **xyz2mol_kwargs)
+        return xyz2ac(xyzblock)
+    if p.is_dir():
+        result = {}
+        for file in p.rglob("*.xyz"):
+            result[file.stem] = _load(file)
+        return result
+    if p.is_file() and p.suffix == ".xyz":
+        return _load(p)
+    raise ValueError(f"No .xyz files found at {path}")
+
+
 def iteratively_determine_bonds(mol, linspace=np.linspace(0.3, 0.1, 30)):
     """Iteratively determine bonds until the molecule is connected."""
     for threshold in linspace:
