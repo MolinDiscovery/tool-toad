@@ -357,15 +357,19 @@ def show_vibs(
     amplitude: float = 1.0,
     transparent: bool = True,
     fps: float | None = None,
-    reps : int = 100
+    reps: int = 100,
+    background_color: str | None = None,
+    vIds: list[int] | int | None = None,
+    viewergrid: tuple[int, int] | None = None,
+    linked: bool = True,
 ):
     """Show normal mode vibration."""
+    import math
+    import py3Dmol
+
     input = results
-    vib = input.get("vibs")[vId]
-    mode = vib["mode"]
-    frequency = vib["frequency"]
-    atoms = results["atoms"]
-    opt_coords = results["opt_coords"]
+    atoms = input["atoms"]
+    opt_coords = input["opt_coords"]
     xyz = ac2xyz(atoms, opt_coords)
 
     if fps is None:
@@ -373,27 +377,81 @@ def show_vibs(
     else:
         interval_ms = max(1, int(1000.0 / fps))
 
-    p = py3Dmol.view(width=width, height=height)
-    p.addModel(xyz, "xyz")
-    propmap = []
-    for j, m in enumerate(mode):
-        propmap.append(
-            {
-                "index": j,
-                "props": {
-                    "dx": m[0],
-                    "dy": m[1],
-                    "dz": m[2],
-                },
-            }
-        )
-    p.mapAtomProperties(propmap)
-    p.vibrate(numFrames, amplitude, True)
-    p.animate({"loop": "backAndForth", "interval": interval_ms, "reps": reps})
-    p.setStyle({"sphere": {"radius": 0.4}, "stick": {}})
-    p.setBackgroundColor("0xeeeeee", int(~transparent))
-    p.zoomTo()
-    print(f"Normal mode {vId} with frequency {frequency} cm^-1")
+    color = background_color or "0xeeeeee"
+    alpha = 0 if transparent else 1
+
+    # ---- Single-view path (original behavior) ----
+    if vIds is None or (isinstance(vIds, list) and len(vIds) == 1) \
+            or isinstance(vIds, int):
+        mode_index = vId
+        if isinstance(vIds, int):
+            mode_index = vIds
+        elif isinstance(vIds, list) and len(vIds) == 1:
+            mode_index = vIds[0]
+
+        vib = input.get("vibs")[mode_index]
+        mode = vib["mode"]
+        frequency = vib["frequency"]
+
+        p = py3Dmol.view(width=width, height=height)
+        p.addModel(xyz, "xyz")
+
+        propmap = []
+        for j, m in enumerate(mode):
+            propmap.append({"index": j, "props": {
+                "dx": m[0], "dy": m[1], "dz": m[2]}})
+        p.mapAtomProperties(propmap)
+        p.vibrate(numFrames, amplitude, True)
+        p.animate({"loop": "backAndForth",
+                   "interval": interval_ms, "reps": reps})
+        p.setStyle({"sphere": {"radius": 0.4}, "stick": {}})
+
+        p.setBackgroundColor(color, alpha)
+        p.zoomTo()
+        print(f"Normal mode {mode_index} with frequency {frequency} cm^-1")
+        return p
+
+    # ---- Grid path (multiple modes) ----
+    if isinstance(vIds, int):
+        mode_indices = [vIds]
+    else:
+        mode_indices = list(vIds)
+
+    n = len(mode_indices)
+    if viewergrid is None:
+        cols = math.ceil(math.sqrt(n))
+        rows = math.ceil(n / cols)
+    else:
+        rows, cols = viewergrid
+
+    p = py3Dmol.view(width=width, height=height,
+                     viewergrid=(rows, cols), linked=linked)
+
+    # Build each cell
+    for i, mi in enumerate(mode_indices):
+        vib = input.get("vibs")[mi]
+        mode = vib["mode"]
+        frequency = vib["frequency"]
+
+        r, c = divmod(i, cols)
+        p.addModel(xyz, "xyz", viewer=(r, c))
+
+        propmap = []
+        for j, m in enumerate(mode):
+            propmap.append({"index": j, "props": {
+                "dx": m[0], "dy": m[1], "dz": m[2]}})
+        p.mapAtomProperties(propmap, viewer=(r, c))
+
+        # per-cell vibrate + animate
+        p.vibrate(numFrames, amplitude, True, viewer=(r, c))
+        p.animate({"loop": "backAndForth",
+                   "interval": interval_ms, "reps": reps}, viewer=(r, c))
+
+        p.setStyle({"sphere": {"radius": 0.4}, "stick": {}}, viewer=(r, c))
+        p.setBackgroundColor(color, alpha, viewer=(r, c))
+        p.zoomTo(viewer=(r, c))
+        print(f"Normal mode {mi} with frequency {frequency} cm^-1")
+
     return p
 
 
