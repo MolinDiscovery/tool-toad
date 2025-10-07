@@ -662,6 +662,372 @@ def MolTo3DGrid(
     2) A list of RDKit molecules (each with one or more conformers),
     in a grid using py3Dmol. In addition to 3D rendering, this function can:
 
+      - Overlay a legend label on each cell (with automatic numbering for
+        multiple conformers).
+      - Highlight specified atoms (via `highlightAtoms`).
+      - Remove specified bonds before rendering (via `bonds_to_remove`).
+      - Toggle per-atom labels on click.
+      - Measure and label the distance between two atoms on Ctrl-click.
+
+    Args:
+        mols (rdkit.Chem.Mol or list of rdkit.Chem.Mol):
+            A single RDKit molecule or a list of molecules, each with 0+ 3D
+            conformers.
+        show_labels (bool):
+            If True, pre-draw atom labels (from `atomNote` or atom index) and
+            enable click-toggle. If False, only click-toggle is enabled.
+        show_confs (bool):
+            If True (default), display every conformer of each mol.
+            If False, only the first conformer (confId=0) is shown.
+        background_color (str):
+            Background color for the viewer (e.g. 'white', 'black').
+        export_HTML (str):
+            If not 'none', path used to write out an HTML file of the grid
+            view.
+        cell_size (tuple of int):
+            (width, height) in pixels for each grid cell.
+        columns (int):
+            Number of columns; rows auto-computed.
+        linked (bool):
+            If True, link all cells for simultaneous rotation/zoom.
+        kekulize (bool):
+            If True, use Kekulé form when generating MolBlocks.
+        legends (list of str):
+            Legend text for each molecule; defaults to ["Mol 1", "Mol 2", …].
+        highlightAtoms (list of int or list of list of int):
+            Zero-based atom indices to highlight per molecule.
+        bonds_to_remove (list of tuple of int):
+            Pairs of atom indices whose bond should be removed before display.
+            e.g. [(10, 41), (10, 12), (11, 41)]
+        show_charges (bool):
+            Show charges in 3D space.
+
+    Returns:
+        None
+    """
+    import os
+    import math
+    from pathlib import Path
+    import py3Dmol
+    from rdkit import Chem
+    from rdkit.Chem import AllChem, rdDetermineBonds
+    from rdkit.Chem.rdchem import RWMol
+
+    try:
+        from tooltoad.utils import chemutils as _chemutils
+    except Exception:
+        _chemutils = None
+
+    # --- helper: coerce any RDKit Mol / '.xyz' path to RDKit Mol ----------------
+    def _coerce_to_mol(item):
+        if isinstance(item, Chem.Mol):
+            return item
+        if isinstance(item, (str, os.PathLike)):
+            p = Path(item)
+            if p.suffix.lower() == ".xyz" and p.is_file():
+                # Prefer tooltoad chemutils if available
+                if _chemutils is not None:
+                    try:
+                        return _chemutils.read_xyz_file(
+                            str(p), return_mol=True, useHueckel=True
+                        )
+                    except Exception:
+                        pass
+                # Fallback: raw RDKit + bond perception
+                block = p.read_text()
+                mol = Chem.MolFromXYZBlock(block)
+                if mol is None:
+                    raise ValueError(f"Could not parse XYZ file: {p}")
+                try:
+                    rdDetermineBonds.DetermineConnectivity(mol, useHueckel=True)
+                except Exception:
+                    # If Hueckel fails, leave as-is; viewer can still show coords
+                    pass
+                try:
+                    Chem.SanitizeMol(mol)
+                except Exception:
+                    pass
+                return mol
+        raise TypeError(
+            "mols must be an RDKit Mol, a list of Mols, a '.xyz' filepath, "
+            "or a list of '.xyz' filepaths."
+        )
+
+    # Wrap single input into list
+    if not isinstance(mols, list):
+        mols = [mols]
+
+    # Coerce xyz paths → RDKit Mols (via tooltoad when available)
+    mols = [_coerce_to_mol(m) for m in mols]
+
+    # Normalize highlightAtoms into list of lists
+    if highlightAtoms is None:
+        normalized_highlights = None
+    else:
+        if all(isinstance(x, int) for x in highlightAtoms):
+            normalized_highlights = [list(highlightAtoms)]
+        else:
+            try:
+                normalized_highlights = [list(seq) for seq in highlightAtoms]
+            except TypeError:
+                raise ValueError(
+                    "highlightAtoms must be a sequence of ints or sequence of "
+                    "sequences."
+                )
+        if len(normalized_highlights) != len(mols):
+            raise ValueError(
+                "Length of highlightAtoms must match number of molecules."
+            )
+
+    # Prepare legends
+    if legends is None:
+        legends = []
+    if not legends:
+        legends = [f"Mol {i+1}" for i in range(len(mols))]
+    if len(legends) != len(mols):
+        raise ValueError(
+            "Length of legends must match the number of molecules."
+        )
+
+    # Ensure 3D conformers and gather pairs
+    mol_conf_pairs = []
+    conf_counts = []
+    mols_with_multiple_confs = False
+
+    for i, mol in enumerate(mols):
+        if mol.GetNumConformers() == 0:
+            params = AllChem.ETKDGv3()
+            params.randomSeed = 0xF00D
+            AllChem.EmbedMolecule(mol, params)
+
+        total_confs = mol.GetNumConformers()
+        if show_confs:
+            conf_list = list(range(total_confs))
+            if total_confs > 1:
+                mols_with_multiple_confs = True
+        else:
+            conf_list = [0]
+
+        conf_counts.append(len(conf_list))
+
+        for conf_id in conf_list:
+            mol_conf_pairs.append((i, conf_id))
+
+    # Compute grid dimensions
+    if len(mols) == 1 and not mols_with_multiple_confs:
+        columns = 1
+    if len(mols) == 2 and not mols_with_multiple_confs:
+        columns = 2
+    total_pairs = len(mol_conf_pairs)
+    rows = math.ceil(total_pairs / columns)
+    total_width = cell_size[0] * columns
+    total_height = cell_size[1] * rows
+
+    # Create viewer
+    viewer = py3Dmol.view(
+        width=total_width, height=total_height,
+        viewergrid=(rows, columns), linked=linked
+    )
+    viewer.setBackgroundColor(background_color)
+
+    # Display each conformer
+    for idx, (m_idx, conf_id) in enumerate(mol_conf_pairs):
+        mol = mols[m_idx]
+        row = idx // columns
+        col = idx % columns
+
+        # 1) copy & remove bonds
+        mol_edit = RWMol(mol)
+        if bonds_to_remove:
+            for i_b, j_b in bonds_to_remove:
+                mol_edit.RemoveBond(i_b, j_b)
+
+        # 2) render the edited mol
+        mol_block = Chem.MolToMolBlock(
+            mol_edit, confId=conf_id, kekulize=kekulize
+        )
+        viewer.addModel(mol_block, 'mol', viewer=(row, col))
+        viewer.setStyle(
+            {}, {'stick': {}, 'sphere': {'radius': 0.3}}, viewer=(row, col)
+        )
+        viewer.zoomTo(viewer=(row, col))
+
+        # Legend
+        label = legends[m_idx]
+        if conf_counts[m_idx] > 1:
+            label += f" c{conf_id+1}"
+        viewer.addLabel(
+            label,
+            {'fontColor': 'black', 'backgroundColor': 'white',
+             'borderColor': 'black', 'borderWidth': 1, 'useScreen': True,
+             'inFront': True, 'screenOffset': {'x': 10, 'y': 0}},
+            viewer=(row, col)
+        )
+
+        # Per-atom labels
+        if show_labels:
+            conf = mol.GetConformer(conf_id)
+            for atom in mol.GetAtoms():
+                idx0 = atom.GetIdx()
+                pos = conf.GetAtomPosition(idx0)
+                text = (atom.GetProp('atomNote') if atom.HasProp('atomNote')
+                        else str(idx0))
+                viewer.addLabel(
+                    text,
+                    {'position': {'x': pos.x, 'y': pos.y, 'z': pos.z},
+                     'fontColor': 'black', 'backgroundColor': 'white',
+                     'borderThickness': 1, 'fontSize': 12},
+                    viewer=(row, col)
+                )
+
+        if show_charges:
+            conf = mol.GetConformer(conf_id)
+            for atom in mol.GetAtoms():
+                fc = atom.GetFormalCharge()
+                if fc == 0:
+                    continue
+
+                i_a = atom.GetIdx()
+                pos = conf.GetAtomPosition(i_a)
+                atom_pos = {'x': pos.x, 'y': pos.y, 'z': pos.z}
+                label_pos = {'x': pos.x, 'y': pos.y, 'z': pos.z}
+
+                color = 'red' if fc > 0 else 'blue'
+                sign = f"{abs(fc)}+" if fc > 0 else f"{abs(fc)}-"
+
+                viewer.addCylinder(
+                    {'start': atom_pos, 'end': label_pos, 'radius': 0.05,
+                     'color': color, 'fromCap': False, 'toCap': False},
+                    viewer=(row, col)
+                )
+
+                viewer.addLabel(
+                    sign,
+                    {'position': label_pos, 'inFront': True, 'fontSize': 16,
+                     'fontColor': color, 'fontWeight': 'bold',
+                     'backgroundColor': 'rgba(255,255,255,0)',
+                     'backgroundOpacity': 0.6},
+                    viewer=(row, col)
+                )
+
+        viewer.setClickable(
+            {}, True,
+            '''function(atom, viewer, event, container) {
+                if(!viewer._picks)       viewer._picks = [];
+                if(!viewer._distLabels)  viewer._distLabels = {};
+                if(!viewer._anglePicks)  viewer._anglePicks = [];
+                if(!viewer._angleLabels) viewer._angleLabels = {};
+
+                // Shift-click: angle
+                if(event.shiftKey) {
+                    viewer._anglePicks.push(atom);
+                    if(viewer._anglePicks.length === 3) {
+                        var A = viewer._anglePicks[0],
+                            B = viewer._anglePicks[1],
+                            C = viewer._anglePicks[2];
+                        var key = [A.index,B.index,C.index].join('-');
+                        if(key in viewer._angleLabels) {
+                            viewer.removeLabel(viewer._angleLabels[key]);
+                            delete viewer._angleLabels[key];
+                        } else {
+                            function vec(u,v){return{x:u.x-v.x,y:u.y-v.y,z:u.z-v.z}};
+                            var vBA=vec(A,B), vBC=vec(C,B);
+                            var dot=vBA.x*vBC.x+vBA.y*vBC.y+vBA.z*vBC.z;
+                            var magBA=Math.sqrt(vBA.x*vBA.x+vBA.y*vBA.y+vBA.z*vBA.z);
+                            var magBC=Math.sqrt(vBC.x*vBC.x+vBC.y*vBC.y+vBC.z*vBC.z);
+                            var angle=(Math.acos(dot/(magBA*magBC))*(180/Math.PI))
+                                      .toFixed(2)+'°';
+                            var lbl = viewer.addLabel(angle,
+                                {position:{x:B.x,y:B.y,z:B.z},
+                                 backgroundColor:'blue', fontColor:'white',
+                                 fontSize:12});
+                            viewer._angleLabels[key] = lbl;
+                        }
+                        viewer._anglePicks = [];
+                    }
+                }
+                // Ctrl-click: distance
+                else if(event.ctrlKey) {
+                    viewer._picks.push(atom);
+                    if(viewer._picks.length === 2) {
+                        var a=viewer._picks[0], b=viewer._picks[1];
+                        var key=[Math.min(a.index,b.index),
+                                 Math.max(a.index,b.index)].join('-');
+                        if(key in viewer._distLabels) {
+                            viewer.removeLabel(viewer._distLabels[key]);
+                            delete viewer._distLabels[key];
+                        } else {
+                            var dx=a.x-b.x, dy=a.y-b.y, dz=a.z-b.z;
+                            var dist=Math.sqrt(dx*dx+dy*dy+dz*dz)
+                                      .toFixed(3)+' Å';
+                            var mid={x:(a.x+b.x)/2,y:(a.y+b.y)/2,z:(a.z+b.z)/2};
+                            var lbl=viewer.addLabel(dist,
+                                {position:mid,backgroundColor:'grey',
+                                 fontColor:'white',fontSize:12});
+                            viewer._distLabels[key]=lbl;
+                        }
+                        viewer._picks = [];
+                    }
+                }
+                // Click: toggle label
+                else {
+                    if(atom.label) {
+                        viewer.removeLabel(atom.label); delete atom.label;
+                    } else {
+                        atom.label = viewer.addLabel(
+                            atom.index,
+                            {position:atom, backgroundColor:'white',
+                             fontColor:'black', fontSize:12}
+                        );
+                    }
+                }
+                viewer.render();
+            }'''
+        )
+
+        # Highlight atoms if requested
+        if normalized_highlights is not None:
+            atoms_sel = normalized_highlights[m_idx]
+            viewer.setStyle(
+                {'serial': atoms_sel},
+                {'stick': {'radius': 0.2, 'color': 'red'},
+                 'sphere': {'radius': 0.4, 'color': 'red'}},
+                viewer=(row, col)
+            )
+
+    # Export HTML if requested
+    if export_HTML != 'none':
+        try:
+            os.makedirs(os.path.dirname(export_HTML), exist_ok=True)
+            viewer.write_html(export_HTML)
+            print(f"HTML export successful: {export_HTML}")
+        except Exception as e:
+            print(f"Error exporting HTML to '{export_HTML}': {e}")
+
+    viewer.show()
+
+
+def MolTo3DGrid_old(
+    mols,
+    show_labels=False,
+    show_confs: bool = True,
+    background_color='white',
+    export_HTML='none',
+    cell_size=(400, 400),
+    columns=3,
+    linked=False,
+    kekulize=True,
+    legends=None,
+    highlightAtoms=None,
+    bonds_to_remove=None,
+    show_charges=True,
+):
+    """
+    Displays either:
+    1) All conformers of a single RDKit molecule, or
+    2) A list of RDKit molecules (each with one or more conformers),
+    in a grid using py3Dmol. In addition to 3D rendering, this function can:
+
       - Overlay a legend label on each cell (with automatic numbering for multiple conformers).
       - Highlight specified atoms (via `highlightAtoms`).
       - Remove specified bonds before rendering (via `bonds_to_remove`).
