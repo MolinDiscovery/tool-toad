@@ -90,6 +90,7 @@ def orca_calculate(
         save_dir.mkdir(parents=True, exist_ok=True)
     check_executable(orca_cmd)
     work_dir = WorkingDir(root=scr, name=calc_dir)
+    orig_xtbpath = os.environ.get("XTBPATH")
     os.environ["XTBPATH"] = str(work_dir)
 
     if data2file:
@@ -207,6 +208,12 @@ End"""
             work_dir.cleanup()
         else:
             results["calc_dir"] = str(work_dir)
+        
+        # Reset path to to avoid calc_dir artefacts.
+        if orig_xtbpath is None:
+            os.environ.pop("XTBPATH", None)
+        else:
+            os.environ["XTBPATH"] = orig_xtbpath        
 
     time = datetime.now()
     results["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
