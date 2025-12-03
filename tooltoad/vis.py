@@ -1007,291 +1007,752 @@ def MolTo3DGrid(
     viewer.show()
 
 
-def MolTo3DGrid_old(
-    mols,
-    show_labels=False,
-    show_confs: bool = True,
-    background_color='white',
-    export_HTML='none',
+def RxnTo3DGrid(
+    rxn,
+    show_labels: bool = False,
+    background_color: str = 'white',
+    export_HTML: str = 'none',
     cell_size=(400, 400),
-    columns=3,
-    linked=False,
-    kekulize=True,
+    linked: bool = False,
+    kekulize: bool = True,
+    show_charges: bool = True,
     legends=None,
-    highlightAtoms=None,
-    bonds_to_remove=None,
-    show_charges=True,
+    show_bond_changes: bool = False,
+    h_mode: str = "none",          # "none" | "reactive" | "all"
+    show_charge_changes: bool = False,
+    check_reaction_stoichiometry: bool = False
 ):
     """
-    Displays either:
-    1) All conformers of a single RDKit molecule, or
-    2) A list of RDKit molecules (each with one or more conformers),
-    in a grid using py3Dmol. In addition to 3D rendering, this function can:
+    Displays a reaction in 3D using py3Dmol.
 
-      - Overlay a legend label on each cell (with automatic numbering for multiple conformers).
-      - Highlight specified atoms (via `highlightAtoms`).
-      - Remove specified bonds before rendering (via `bonds_to_remove`).
-      - Toggle per-atom labels on click.
-      - Measure and label the distance between two atoms on Ctrl-click.
+    Layout:
+        [ Reactants ]   [ 3D arrow ]   [ Products ]
 
     Args:
-        mols (rdkit.Chem.Mol or list of rdkit.Chem.Mol):
-            A single RDKit molecule or a list of molecules, each with 0+ 3D conformers.
-        show_labels (bool):
-            If True, pre-draw atom labels (from `atomNote` or atom index) and enable click-toggle.
-            If False, only click-toggle is enabled.
-        show_confs (bool):
-            If True (default), display every conformer of each mol.
-            If False, only the first conformer (confId=0) is shown.
-        background_color (str):
+        rxn:
+            RDKit ChemicalReaction or a reaction SMILES/SMARTS string.
+            Strings are parsed with ReactionFromSmarts(..., useSmiles=True).
+        show_labels:
+            If True, pre-draw atom labels (index or atomNote) and allow
+            click-toggle for labels.
+        background_color:
             Background color for the viewer (e.g. 'white', 'black').
-        export_HTML (str):
-            If not 'none', path used to write out an HTML file of the grid view.
-        cell_size (tuple of int):
-            (width, height) in pixels for each grid cell.
-        columns (int):
-            Number of columns; rows auto-computed.
-        linked (bool):
-            If True, link all cells for simultaneous rotation/zoom.
-        kekulize (bool):
+        export_HTML:
+            If not 'none', path used to write out an HTML file of the grid
+            view.
+        cell_size:
+            (width, height) in pixels for each of the three cells.
+        linked:
+            If True, link cells for simultaneous rotation/zoom.
+        kekulize:
             If True, use Kekulé form when generating MolBlocks.
-        legends (list of str):
-            Legend text for each molecule; defaults to ["Mol 1", "Mol 2", …].
-        highlightAtoms (list of int or list of list of int):
-            Zero-based atom indices to highlight per molecule.
-        bonds_to_remove (list of tuple of int):
-            Pairs of atom indices whose bond should be removed before display.
-            e.g. [(10, 41), (10, 12), (11, 41)]
-        show_charges (bool):
-            Show charges in 3D space.
-
-    Returns:
-        None
+        show_charges:
+            Show formal charges in 3D space (per-atom annotation).
+        legends:
+            Optional two labels: [reactant_label, product_label].
+            Defaults to ["Reactants", "Products"].
+        show_bond_changes:
+            If True and the reaction is atom-mapped, highlight bonds broken
+            (red), formed (green), and with changed bond order (orange).
+        h_mode:
+            "none"      → hide all hydrogens (even explicit ones).
+            "reactive"  → show only the hydrogens explicitly present in the
+                          reaction (typically reactive/proton-transfer H).
+            "all"       → Add explicit hydrogens to all molecules and show
+                          them.
+        show_charge_changes:
+            If True and the reaction is atom-mapped, highlight atoms whose
+            formal charge changes between reactants and products (red for
+            more positive, blue for more negative).
+        check_reaction_stoichiometry:
+            If True a summary of the stoichiometry will be printed.
     """
     import os
-    import math
+    from pathlib import Path
+
     import py3Dmol
-    from rdkit import Chem
-    from rdkit.Chem import AllChem
+    from rdkit import Chem, rdBase
+    from rdkit.Chem import AllChem, rdChemReactions, rdDepictor
     from rdkit.Chem.rdchem import RWMol
+    from rdkit.Geometry import Point3D
+    from collections import defaultdict, Counter
 
-    # Wrap single molecule into list
-    if not isinstance(mols, list):
-        mols = [mols]
+    try:
+        from tooltoad.utils import chemutils as _chemutils
+    except Exception:
+        _chemutils = None
 
-    # Normalize highlightAtoms into list of lists
-    # Accept: None, flat list/tuple, or sequence of sequences
-    if highlightAtoms is None:
-        normalized_highlights = None
-    else:
-        # detect flat sequence of ints
-        if all(isinstance(x, int) for x in highlightAtoms):
-            normalized_highlights = [list(highlightAtoms)]
-        else:
-            # assume sequence of sequences
-            try:
-                normalized_highlights = [list(seq) for seq in highlightAtoms]
-            except TypeError:
-                raise ValueError("highlightAtoms must be a sequence of ints or sequence of sequences.")
-        if len(normalized_highlights) != len(mols):
-            raise ValueError("Length of highlightAtoms must match number of molecules.")
-
-    # Prepare legends
-    if legends is None:
-        legends = []
-    if not legends:
-        legends = [f"Mol {i+1}" for i in range(len(mols))]
-    if len(legends) != len(mols):
-        raise ValueError("Length of legends must match the number of molecules.")
-
-    # Ensure 3D conformers and gather pairs
-    mol_conf_pairs = []
-    conf_counts = []
-    mols_with_multiple_confs = False
-
-    for i, mol in enumerate(mols):
-        # ensure at least one 3D conf
-        if mol.GetNumConformers() == 0:
-            params = AllChem.ETKDGv3()
-            params.randomSeed = 0xf00d
-            AllChem.EmbedMolecule(mol, params)
-
-        total_confs = mol.GetNumConformers()
-        # decide which confs to display
-        if show_confs:
-            conf_list = list(range(total_confs))
-            if total_confs > 1:
-                mols_with_multiple_confs = True
-        else:
-            # only show the first conformer
-            conf_list = [0]
-
-        # record how many *we are actually* displaying
-        conf_counts.append(len(conf_list))
-
-        for conf_id in conf_list:
-            mol_conf_pairs.append((i, conf_id))
-            
-    # Compute grid dimensions
-    if len(mols) == 1 and not mols_with_multiple_confs:
-        columns = 1
-    if len(mols) == 2 and not mols_with_multiple_confs:
-        columns = 2
-    total_pairs = len(mol_conf_pairs)
-    rows = math.ceil(total_pairs / columns)
-    total_width = cell_size[0] * columns
-    total_height = cell_size[1] * rows
-
-    # Create viewer
-    viewer = py3Dmol.view(width=total_width, height=total_height, viewergrid=(rows, columns), linked=linked)
-    viewer.setBackgroundColor(background_color)
-
-    # Display each conformer
-    for idx, (m_idx, conf_id) in enumerate(mol_conf_pairs):
-        mol = mols[m_idx]
-        row = idx // columns
-        col = idx % columns
-
-        # 1) copy & remove bonds
-        mol_edit = RWMol(mol)
-        if bonds_to_remove:
-            for i, j in bonds_to_remove:
-                mol_edit.RemoveBond(i, j)
-
-        # 2) render the edited mol
-        mol_block = Chem.MolToMolBlock(mol_edit, confId=conf_id, kekulize=kekulize)
-        viewer.addModel(mol_block, 'mol', viewer=(row, col))
-        viewer.setStyle({}, {'stick': {}, 'sphere': {'radius': 0.3}}, viewer=(row, col))
-        viewer.zoomTo(viewer=(row, col))
-
-        # Legend<
-        label = legends[m_idx]
-        if conf_counts[m_idx] > 1:
-            label += f" c{conf_id+1}"
-        viewer.addLabel(label,
-            {'fontColor':'black', 'backgroundColor':'white', 'borderColor':'black', 'borderWidth':1,
-             'useScreen':True, 'inFront':True, 'screenOffset':{'x':10,'y':0}},
-            viewer=(row, col)
+    h_mode = h_mode.lower()
+    if h_mode not in ("none", "reactive", "all"):
+        raise ValueError(
+            "h_mode must be one of 'none', 'reactive', or 'all'."
         )
 
-        # Per-atom labels
-        if show_labels:
-            conf = mol.GetConformer(conf_id)
-            for atom in mol.GetAtoms():
-                idx0 = atom.GetIdx()
-                pos = conf.GetAtomPosition(idx0)
-                text = atom.GetProp('atomNote') if atom.HasProp('atomNote') else str(idx0)
-                viewer.addLabel(text,
-                    {'position':{'x':pos.x,'y':pos.y,'z':pos.z}, 'fontColor':'black', 'backgroundColor':'white',
-                     'borderThickness':1, 'fontSize':12},
-                    viewer=(row, col)
-                )
+    # --- helpers -------------------------------------------------------------
+    def _coerce_to_mol(item):
+        """Coerce RDKit Mol / xyz path to RDKit Mol (similar to MolTo3DGrid)."""
+        if isinstance(item, Chem.Mol):
+            return item
+        if isinstance(item, (str, os.PathLike)):
+            p = Path(item)
+            if p.suffix.lower() == ".xyz" and p.is_file():
+                if _chemutils is not None:
+                    try:
+                        return _chemutils.read_xyz_file(
+                            str(p), return_mol=True, useHueckel=True
+                        )
+                    except Exception:
+                        pass
+                block = p.read_text()
+                mol = Chem.MolFromXYZBlock(block)
+                if mol is None:
+                    raise ValueError(f"Could not parse XYZ file: {p}")
+                try:
+                    from rdkit.Chem import rdDetermineBonds
 
-        if show_charges:
-            conf = mol.GetConformer(conf_id)
-            for atom in mol.GetAtoms():
-                fc = atom.GetFormalCharge()
-                if fc == 0: continue
+                    rdDetermineBonds.DetermineConnectivity(
+                        mol, useHueckel=True
+                    )
+                except Exception:
+                    pass
+                try:
+                    Chem.SanitizeMol(mol)
+                except Exception:
+                    pass
+                return mol
+        raise TypeError(
+            "rxn must be a ChemicalReaction, a reaction SMILES/SMARTS string, "
+            "or xyz-based molecule definitions."
+        )
 
-                i = atom.GetIdx()
+    def _ensure_3d(mol):
+        """Ensure mol has at least one conformer, suppressing RDKit log spam."""
+        from rdkit import Chem
+        from rdkit.Chem import AllChem, rdDepictor
+
+        if mol.GetNumConformers() > 0:
+            return
+
+        # Temporarily suppress RDKit logs (all rdApp.*)
+        with rdBase.BlockLogs():
+            try:
+                Chem.SanitizeMol(mol)
+            except Exception:
+                pass
+
+            try:
+                params = AllChem.ETKDGv3()
+                params.randomSeed = 0xF00D
+                AllChem.EmbedMolecule(mol, params)
+                if mol.GetNumConformers() > 0:
+                    return
+            except Exception:
+                pass
+
+            # 2D fallback
+            try:
+                rdDepictor.Compute2DCoords(mol)
+            except Exception:
+                pass
+
+    def _offset_mol(mol, dx):
+        mol = RWMol(mol)
+        if mol.GetNumConformers() == 0:
+            _ensure_3d(mol)
+        conf = mol.GetConformer()
+        for i in range(mol.GetNumAtoms()):
+            pos = conf.GetAtomPosition(i)
+            conf.SetAtomPosition(i, Point3D(pos.x + dx, pos.y, pos.z))
+        return mol
+
+    def _prepare_side(mols, gap: float = 3.0):
+        """Return 3D mols laid out along x without overlapping (bbox-based)."""
+        prepared = []
+        bounds = []
+        current_x = 0.0
+
+        for m in mols:
+            m = _coerce_to_mol(Chem.Mol(m))
+            _ensure_3d(m)
+
+            conf = m.GetConformer()
+            xs = [conf.GetAtomPosition(i).x for i in range(m.GetNumAtoms())]
+            if not xs:
+                prepared.append(m)
+                continue
+            xmin, xmax = min(xs), max(xs)
+
+            dx = current_x - xmin
+            m_off = _offset_mol(m, dx)
+            xmin_off = xmin + dx
+            xmax_off = xmax + dx
+            bounds.append((xmin_off, xmax_off))
+            prepared.append(m_off)
+
+            current_x = xmax_off + gap
+
+        if not prepared or not bounds:
+            return prepared
+
+        all_min = min(b[0] for b in bounds)
+        all_max = max(b[1] for b in bounds)
+        center = 0.5 * (all_min + all_max)
+
+        for m in prepared:
+            conf = m.GetConformer()
+            for i in range(m.GetNumAtoms()):
                 pos = conf.GetAtomPosition(i)
-                atom_pos = {'x': pos.x, 'y': pos.y, 'z': pos.z}
-                label_pos = {'x': pos.x, 'y': pos.y, 'z': pos.z}
-
-                color = 'red' if fc>0 else 'blue'
-                sign  = f"{abs(fc)}+" if fc>0 else f"{abs(fc)}-"
-
-                viewer.addCylinder({
-                    'start': atom_pos,
-                    'end':   label_pos,
-                    'radius': 0.05,
-                    'color': color,
-                    'fromCap': False,
-                    'toCap': False
-                }, viewer=(row, col))
-
-                viewer.addLabel(
-                    sign,
-                    {
-                    'position':     label_pos,
-                    'inFront':      True,
-                    'fontSize':     16,
-                    'fontColor':    color,
-                    'fontWeight':   'bold',
-                    'backgroundColor': 'rgba(255,255,255,0)',
-                    'backgroundOpacity': 0.6,
-                    },
-                    viewer=(row, col)
+                conf.SetAtomPosition(
+                    i, Point3D(pos.x - center, pos.y, pos.z)
                 )
+
+        return prepared
+
+    def _add_side_to_viewer(side_mols, viewer, grid_pos, label):
+        """Add all mols for one side (reactants or products) to a given cell."""
+        row, col = grid_pos
+        for m in side_mols:
+            block = Chem.MolToMolBlock(m, kekulize=kekulize)
+            viewer.addModel(block, 'mol', viewer=(row, col))
+
+        viewer.setStyle(
+            {}, {'stick': {}, 'sphere': {'radius': 0.3}}, viewer=(row, col)
+        )
+
+        # Hydrogen visibility control
+        if h_mode == "none":
+            viewer.setStyle({'elem': 'H'}, {}, viewer=(row, col))
+
+        viewer.zoomTo(viewer=(row, col))
+
+        if label:
+            viewer.addLabel(
+                label,
+                {
+                    'fontColor': 'black',
+                    'backgroundColor': 'white',
+                    'borderColor': 'black',
+                    'borderWidth': 1,
+                    'useScreen': True,
+                    'inFront': True,
+                    'screenOffset': {'x': 10, 'y': 0},
+                },
+                viewer=(row, col),
+            )
+
+        if show_labels or show_charges:
+            for m in side_mols:
+                conf = m.GetConformer()
+                for atom in m.GetAtoms():
+                    if h_mode == "none" and atom.GetSymbol() == "H":
+                        continue
+
+                    idx0 = atom.GetIdx()
+                    pos = conf.GetAtomPosition(idx0)
+                    apos = {'x': pos.x, 'y': pos.y, 'z': pos.z}
+
+                    if show_labels:
+                        text = (
+                            atom.GetProp('atomNote')
+                            if atom.HasProp('atomNote')
+                            else str(idx0)
+                        )
+                        viewer.addLabel(
+                            text,
+                            {
+                                'position': apos,
+                                'fontColor': 'black',
+                                'backgroundColor': 'white',
+                                'borderThickness': 1,
+                                'fontSize': 12,
+                            },
+                            viewer=(row, col),
+                        )
+
+                    if show_charges:
+                        fc = atom.GetFormalCharge()
+                        if fc != 0:
+                            color = 'red' if fc > 0 else 'blue'
+                            sign = (
+                                f"{abs(fc)}+"
+                                if fc > 0
+                                else f"{abs(fc)}-"
+                            )
+                            viewer.addLabel(
+                                sign,
+                                {
+                                    'position': apos,
+                                    'inFront': True,
+                                    'fontSize': 16,
+                                    'fontColor': color,
+                                    'fontWeight': 'bold',
+                                    'backgroundColor': 'rgba(255,255,255,0)',
+                                    'backgroundOpacity': 0.6,
+                                },
+                                viewer=(row, col),
+                            )
+
+    def _collect_mapped_bonds(mol_list):
+        """Return dict[(map1,map2)] -> bondType for mapped bonds."""
+        bonds = {}
+        for m in mol_list:
+            for b in m.GetBonds():
+                a1 = b.GetBeginAtom()
+                a2 = b.GetEndAtom()
+                if (
+                    a1.HasProp('molAtomMapNumber')
+                    and a2.HasProp('molAtomMapNumber')
+                ):
+                    m1 = a1.GetIntProp('molAtomMapNumber')
+                    m2 = a2.GetIntProp('molAtomMapNumber')
+                    key = tuple(sorted((m1, m2)))
+                    bonds[key] = b.GetBondType()
+        return bonds
+
+    def _build_mapnum_index(side_mols):
+        """mapNum -> (mol_idx, atom_idx) for displayed side mols."""
+        mapping = {}
+        for m_idx, m in enumerate(side_mols):
+            for a in m.GetAtoms():
+                if a.HasProp('molAtomMapNumber'):
+                    mnum = a.GetIntProp('molAtomMapNumber')
+                    mapping[mnum] = (m_idx, a.GetIdx())
+        return mapping
+
+    def _build_mapnum_symbol(side_mols):
+        """mapNum -> atomic symbol."""
+        mapping = {}
+        for m in side_mols:
+            for a in m.GetAtoms():
+                if a.HasProp('molAtomMapNumber'):
+                    mnum = a.GetIntProp('molAtomMapNumber')
+                    mapping[mnum] = a.GetSymbol()
+        return mapping
+
+    def _add_bond_change_cylinders(
+        pairs, side_mols, map_index, color, viewer, grid_pos
+    ):
+        """Overlay cylinders for changed bonds."""
+        row, col = grid_pos
+        for m1, m2 in pairs:
+            info1 = map_index.get(m1)
+            info2 = map_index.get(m2)
+            if info1 is None or info2 is None:
+                continue
+            m_idx1, a_idx1 = info1
+            m_idx2, a_idx2 = info2
+
+            m1_mol = side_mols[m_idx1]
+            m2_mol = side_mols[m_idx2]
+            conf1 = m1_mol.GetConformer()
+            conf2 = m2_mol.GetConformer()
+            p1 = conf1.GetAtomPosition(a_idx1)
+            p2 = conf2.GetAtomPosition(a_idx2)
+
+            start = {'x': p1.x, 'y': p1.y, 'z': p1.z}
+            end = {'x': p2.x, 'y': p2.y, 'z': p2.z}
+
+            viewer.addCylinder(
+                {
+                    'start': start,
+                    'end': end,
+                    'radius': 0.18,
+                    'color': color,
+                },
+                viewer=(row, col),
+            )
+
+    def _add_charge_change_spheres(
+        side_mols, map_index, charge_delta, viewer, grid_pos
+    ):
+        """Overlay spheres at atoms whose formal charge changes."""
+        row, col = grid_pos
+        for mnum, delta in charge_delta.items():
+            info = map_index.get(mnum)
+            if info is None:
+                continue
+            m_idx, a_idx = info
+            m = side_mols[m_idx]
+            atom = m.GetAtomWithIdx(a_idx)
+            if h_mode == "none" and atom.GetSymbol() == "H":
+                continue
+
+            conf = m.GetConformer()
+            pos = conf.GetAtomPosition(a_idx)
+            color = 'red' if delta > 0 else 'blue'
+            viewer.addSphere(
+                {
+                    'center': {'x': pos.x, 'y': pos.y, 'z': pos.z},
+                    'radius': 0.35,
+                    'color': color,
+                    'alpha': 0.7,
+                },
+                viewer=(row, col),
+            )
+
+    def _add_hs_safe(mol_in):
+        """Best-effort AddHs that won't crash on weird valence/query atoms."""
+        mol = Chem.Mol(mol_in)  # work on a copy
+
+        try:
+            Chem.SanitizeMol(mol)
+        except Exception:
+            pass
+
+        try:
+            mh = Chem.AddHs(mol)
+        except Exception:
+            # If AddHs fails, just return the sanitized (or original) mol
+            mh = mol
+
+        return mh
+
+    def _check_reaction_stoichiometry(reactants, products, verbose: bool = True):
+        """Internal stoichiometry check on lists of RDKit mols."""
+        def _side_counts(mols):
+            elem = Counter()
+            total_charge = 0
+            for m in mols:
+                mol = Chem.Mol(m)  # work on a copy
+
+                # try to sanitize, but don't die if it fails
+                try:
+                    Chem.SanitizeMol(mol)
+                except Exception:
+                    pass
+
+                # try to add explicit H; if that fails, just use mol as-is
+                try:
+                    mh = Chem.AddHs(mol)
+                except Exception:
+                    mh = mol
+
+                for atom in mh.GetAtoms():
+                    elem[atom.GetSymbol()] += 1
+                    total_charge += atom.GetFormalCharge()
+
+            return elem, total_charge
+
+        r_counts, r_charge = _side_counts(reactants)
+        p_counts, p_charge = _side_counts(products)
+
+        elements = sorted(set(r_counts) | set(p_counts))
+        element_diffs = {}
+        atoms_balanced = True
+        for el in elements:
+            r_n = r_counts.get(el, 0)
+            p_n = p_counts.get(el, 0)
+            if r_n != p_n:
+                atoms_balanced = False
+            element_diffs[el] = (r_n, p_n, p_n - r_n)
+
+        charges_balanced = (r_charge == p_charge)
+
+        result = {
+            "atoms_balanced": atoms_balanced,
+            "charges_balanced": charges_balanced,
+            "reactant_counts": r_counts,
+            "product_counts": p_counts,
+            "element_diffs": element_diffs,
+            "reactant_charge": r_charge,
+            "product_charge": p_charge,
+        }
+
+        if verbose:
+            print("=== Stoichiometry check (RxnTo3DGrid) ===")
+            for el in elements:
+                r_n, p_n, delta = element_diffs[el]
+                print(
+                    f"{el:>2}: reactants={r_n:3d}  products={p_n:3d}  "
+                    f"Δ={delta:+d}"
+                )
+            print(
+                f"\nTotal charge: reactants={r_charge:+d}, "
+                f"products={p_charge:+d}"
+            )
+            print(f"\nAtoms balanced:   {atoms_balanced}")
+            print(f"Charges balanced: {charges_balanced}\n")
+
+        return result        
+
+    # --- coerce rxn ----------------------------------------------------------
+    if isinstance(rxn, (str, os.PathLike)):
+        rxn_str = str(rxn)
+        rxn_obj = rdChemReactions.ReactionFromSmarts(
+            rxn_str, useSmiles=True
+        )
+        if rxn_obj is None:
+            raise ValueError(
+                "Could not parse reaction string. Make sure it is a valid "
+                "reaction SMILES/SMARTS."
+            )
+    elif hasattr(rxn, "GetReactants") and hasattr(rxn, "GetProducts"):
+        rxn_obj = rxn
+    else:
+        raise TypeError(
+            "rxn must be a ChemicalReaction or a reaction SMILES/SMARTS "
+            "string."
+        )
+
+    reactant_mols = [Chem.Mol(m) for m in rxn_obj.GetReactants()]
+    product_mols = [Chem.Mol(m) for m in rxn_obj.GetProducts()]
+
+    # --- stoichiometry check (before any AddHs / coordinate tweaks) -------
+    balance_label = None
+    balance_color = "black"
+
+    if check_reaction_stoichiometry:
+        stoich_result = _check_reaction_stoichiometry(
+            reactant_mols, product_mols, verbose=True  # or False if you hate prints
+        )
+
+        atoms_ok = stoich_result["atoms_balanced"]
+        charge_ok = stoich_result["charges_balanced"]
+    else:
+        stoich_result = _check_reaction_stoichiometry(
+            reactant_mols, product_mols, verbose=False  # or False if you hate prints
+        )
         
-        viewer.setClickable(
-                {}, True,
-                '''function(atom, viewer, event, container) {
-                    if(!viewer._picks)       viewer._picks = [];
-                    if(!viewer._distLabels)  viewer._distLabels = {};
-                    if(!viewer._anglePicks)  viewer._anglePicks = [];
-                    if(!viewer._angleLabels) viewer._angleLabels = {};
+        atoms_ok = stoich_result["atoms_balanced"]
+        charge_ok = stoich_result["charges_balanced"]
 
-                    // Shift-click: angle
-                    if(event.shiftKey) {
-                        viewer._anglePicks.push(atom);
-                        if(viewer._anglePicks.length === 3) {
-                            var A = viewer._anglePicks[0], B = viewer._anglePicks[1], C = viewer._anglePicks[2];
-                            var key = [A.index,B.index,C.index].join('-');
-                            if(key in viewer._angleLabels) {
-                                viewer.removeLabel(viewer._angleLabels[key]);
-                                delete viewer._angleLabels[key];
-                            } else {
-                                function vec(u,v){return{x:u.x-v.x,y:u.y-v.y,z:u.z-v.z}};
-                                var vBA=vec(A,B), vBC=vec(C,B);
-                                var dot=vBA.x*vBC.x+vBA.y*vBC.y+vBA.z*vBC.z;
-                                var magBA=Math.sqrt(vBA.x*vBA.x+vBA.y*vBA.y+vBA.z*vBA.z);
-                                var magBC=Math.sqrt(vBC.x*vBC.x+vBC.y*vBC.y+vBC.z*vBC.z);
-                                var angle=(Math.acos(dot/(magBA*magBC))*(180/Math.PI)).toFixed(2)+'°';
-                                var lbl = viewer.addLabel(angle,
-                                    {position:{x:B.x,y:B.y,z:B.z}, backgroundColor:'blue', fontColor:'white', fontSize:12});
-                                viewer._angleLabels[key] = lbl;
-                            }
-                            viewer._anglePicks = [];
-                        }
-                    }
-                    // Ctrl-click: distance
-                    else if(event.ctrlKey) {
-                        viewer._picks.push(atom);
-                        if(viewer._picks.length === 2) {
-                            var a=viewer._picks[0], b=viewer._picks[1];
-                            var key=[Math.min(a.index,b.index),Math.max(a.index,b.index)].join('-');
-                            if(key in viewer._distLabels) {
-                                viewer.removeLabel(viewer._distLabels[key]); delete viewer._distLabels[key];
-                            } else {
-                                var dx=a.x-b.x, dy=a.y-b.y, dz=a.z-b.z;
-                                var dist=Math.sqrt(dx*dx+dy*dy+dz*dz).toFixed(3)+' Å';
-                                var mid={x:(a.x+b.x)/2,y:(a.y+b.y)/2,z:(a.z+b.z)/2};
-                                var lbl=viewer.addLabel(dist,{position:mid,backgroundColor:'grey',fontColor:'white',fontSize:12});
-                                viewer._distLabels[key]=lbl;
-                            }
-                            viewer._picks = [];
-                        }
-                    }
-                    // Click: toggle label
-                    else {
-                        if(atom.label) {viewer.removeLabel(atom.label); delete atom.label;} 
-                        else {atom.label = viewer.addLabel(atom.index,{position:atom, backgroundColor:'white', fontColor:'black', fontSize:12});}
-                    }
-                    viewer.render();
-                }'''
+    if atoms_ok and charge_ok:
+        balance_label = "atoms ✓, charge ✓"
+        balance_color = "green"
+    elif atoms_ok and not charge_ok:
+        balance_label = "atoms ✓, charge ✗"
+        balance_color = "orange"
+    elif not atoms_ok and charge_ok:
+        balance_label = "atoms ✗, charge ✓"
+        balance_color = "orange"
+    else:
+        balance_label = "atoms ✗, charge ✗"
+        balance_color = "red"
+
+    # hydrogen handling at molecule level
+    if h_mode == "all":
+        reactant_mols = [_add_hs_safe(m) for m in reactant_mols]
+        product_mols = [_add_hs_safe(m) for m in product_mols]
+    # "reactive" and "none" keep only explicitly present H (typically
+    # reactive ones if they are written in the reaction SMILES).
+
+    # --- bond-change and charge-change analysis ------------------------------
+    broken_bonds = set()
+    formed_bonds = set()
+    changed_bonds = set()
+    have_mapping = False
+
+    charge_delta = {}  # mapNum -> (p_charge - r_charge)
+
+    if show_bond_changes or show_charge_changes:
+        # bond changes
+        rb = _collect_mapped_bonds(reactant_mols)
+        pb = _collect_mapped_bonds(product_mols)
+        if rb or pb:
+            have_mapping = True
+            r_keys = set(rb.keys())
+            p_keys = set(pb.keys())
+            broken_bonds = r_keys - p_keys
+            formed_bonds = p_keys - r_keys
+            common = r_keys & p_keys
+            changed_bonds = {k for k in common if rb[k] != pb[k]}
+
+        # charge changes
+        r_charge_map = defaultdict(int)
+        p_charge_map = defaultdict(int)
+        for m in reactant_mols:
+            for a in m.GetAtoms():
+                if a.HasProp('molAtomMapNumber'):
+                    mnum = a.GetIntProp('molAtomMapNumber')
+                    r_charge_map[mnum] = a.GetFormalCharge()
+        for m in product_mols:
+            for a in m.GetAtoms():
+                if a.HasProp('molAtomMapNumber'):
+                    mnum = a.GetIntProp('molAtomMapNumber')
+                    p_charge_map[mnum] = a.GetFormalCharge()
+
+        all_maps = set(r_charge_map) | set(p_charge_map)
+        for mnum in all_maps:
+            rc = r_charge_map.get(mnum, 0)
+            pc = p_charge_map.get(mnum, 0)
+            if rc != pc:
+                charge_delta[mnum] = pc - rc
+
+        if (show_bond_changes or show_charge_changes) and not have_mapping:
+            print(
+                "RxnTo3DGrid: mapping not found; bond/charge change "
+                "highlighting limited."
             )
 
-        # Highlight atoms if requested
-        if highlightAtoms is not None:
-            atoms = normalized_highlights[m_idx]
-            viewer.setStyle(
-                {'serial': atoms},
-                {'stick':{'radius':0.2,'color':'red'}, 'sphere':{'radius':0.4,'color':'red'}},
-                viewer=(row, col)
-            )
+    # --- prepare 3D mols for each side --------------------------------------
+    left_side = _prepare_side(reactant_mols, gap=4.0)
+    right_side = _prepare_side(product_mols, gap=4.0)
 
-    # Export HTML if requested
+    if legends is None:
+        legends = ["Reactants", "Products"]
+    if len(legends) != 2:
+        raise ValueError("legends must be a list of two strings.")
+
+    # --- build viewer (1 row, 3 columns) ------------------------------------
+    cols = 3
+    rows = 1
+    total_width = cell_size[0] * cols
+    total_height = cell_size[1] * rows
+
+    viewer = py3Dmol.view(
+        width=total_width,
+        height=total_height,
+        viewergrid=(rows, cols),
+        linked=linked,
+    )
+    viewer.setBackgroundColor(background_color)
+
+    # left: reactants
+    _add_side_to_viewer(left_side, viewer, (0, 0), legends[0])
+
+    # middle: arrow
+    viewer.addArrow(
+        {
+            'start': {'x': -1.5, 'y': 0.0, 'z': 0.0},
+            'end': {'x': 1.5, 'y': 0.0, 'z': 0.0},
+            'radius': 0.15,
+            'color': 'black',
+        },
+        viewer=(0, 1),
+    )
+    viewer.zoomTo(viewer=(0, 1))
+
+    if balance_label is not None:
+        viewer.addLabel(
+            balance_label,
+            {
+                'fontColor': balance_color,
+                'backgroundColor': 'white',
+                'borderColor': balance_color,
+                'borderWidth': 1,
+                'useScreen': True,
+                'inFront': True,
+                # negative y to place label slightly above the arrow
+                'screenOffset': {'x': 120, 'y': -125},
+            },
+            viewer=(0, 1),
+        )    
+
+    # right: products
+    _add_side_to_viewer(right_side, viewer, (0, 2), legends[1])
+
+    # --- overlay bond changes -----------------------------------------------
+    if show_bond_changes and have_mapping:
+        left_index = _build_mapnum_index(left_side)
+        right_index = _build_mapnum_index(right_side)
+
+        _add_bond_change_cylinders(
+            broken_bonds, left_side, left_index, 'red', viewer, (0, 0)
+        )
+        _add_bond_change_cylinders(
+            changed_bonds, left_side, left_index, 'orange', viewer, (0, 0)
+        )
+
+        _add_bond_change_cylinders(
+            formed_bonds, right_side, right_index, 'green', viewer, (0, 2)
+        )
+        _add_bond_change_cylinders(
+            changed_bonds, right_side, right_index, 'orange', viewer, (0, 2)
+        )
+
+    # --- overlay charge changes ---------------------------------------------
+    if show_charge_changes and charge_delta:
+        left_index = _build_mapnum_index(left_side)
+        right_index = _build_mapnum_index(right_side)
+        _add_charge_change_spheres(
+            left_side, left_index, charge_delta, viewer, (0, 0)
+        )
+        _add_charge_change_spheres(
+            right_side, right_index, charge_delta, viewer, (0, 2)
+        )
+
+    # --- clickable distances / angles / labels ------------------------------
+    viewer.setClickable(
+        {}, True,
+        '''function(atom, viewer, event, container) {
+            if(!viewer._picks)       viewer._picks = [];
+            if(!viewer._distLabels)  viewer._distLabels = {};
+            if(!viewer._anglePicks)  viewer._anglePicks = [];
+            if(!viewer._angleLabels) viewer._angleLabels = {};
+
+            // Shift-click: angle
+            if(event.shiftKey) {
+                viewer._anglePicks.push(atom);
+                if(viewer._anglePicks.length === 3) {
+                    var A = viewer._anglePicks[0],
+                        B = viewer._anglePicks[1],
+                        C = viewer._anglePicks[2];
+                    var key = [A.index,B.index,C.index].join('-');
+                    if(key in viewer._angleLabels) {
+                        viewer.removeLabel(viewer._angleLabels[key]);
+                        delete viewer._angleLabels[key];
+                    } else {
+                        function vec(u,v){return{x:u.x-v.x,y:u.y-v.y,z:u.z-v.z}};
+                        var vBA=vec(A,B), vBC=vec(C,B);
+                        var dot=vBA.x*vBC.x+vBA.y*vBC.y+vBA.z*vBC.z;
+                        var magBA=Math.sqrt(
+                            vBA.x*vBA.x+vBA.y*vBA.y+vBA.z*vBA.z
+                        );
+                        var magBC=Math.sqrt(
+                            vBC.x*vBC.x+vBC.y*vBC.y+vBC.z*vBC.z
+                        );
+                        var angle = (
+                            Math.acos(dot/(magBA*magBC))*(180/Math.PI)
+                        ).toFixed(2)+'°';
+                        var lbl = viewer.addLabel(angle,
+                            {position:{x:B.x,y:B.y,z:B.z},
+                             backgroundColor:'blue', fontColor:'white',
+                             fontSize:12});
+                        viewer._angleLabels[key] = lbl;
+                    }
+                    viewer._anglePicks = [];
+                }
+            }
+            // Ctrl-click: distance
+            else if(event.ctrlKey) {
+                viewer._picks.push(atom);
+                if(viewer._picks.length === 2) {
+                    var a=viewer._picks[0], b=viewer._picks[1];
+                    var key=[Math.min(a.index,b.index),
+                             Math.max(a.index,b.index)].join('-');
+                    if(key in viewer._distLabels) {
+                        viewer.removeLabel(viewer._distLabels[key]);
+                        delete viewer._distLabels[key];
+                    } else {
+                        var dx=a.x-b.x, dy=a.y-b.y, dz=a.z-b.z;
+                        var dist=Math.sqrt(dx*dx+dy*dy+dz*dz)
+                                  .toFixed(3)+' Å';
+                        var mid={x:(a.x+b.x)/2,y:(a.y+b.y)/2,z:(a.z+b.z)/2};
+                        var lbl=viewer.addLabel(dist,
+                            {position:mid,backgroundColor:'grey',
+                             fontColor:'white',fontSize:12});
+                        viewer._distLabels[key]=lbl;
+                    }
+                    viewer._picks = [];
+                }
+            }
+            // Click: toggle label
+            else {
+                if(atom.label) {
+                    viewer.removeLabel(atom.label); delete atom.label;
+                } else {
+                    atom.label = viewer.addLabel(
+                        atom.index,
+                        {position:atom, backgroundColor:'white',
+                         fontColor:'black', fontSize:12}
+                    );
+                }
+            }
+            viewer.render();
+        }'''
+    )
+
+    # --- export --------------------------------------------------------------
     if export_HTML != 'none':
         try:
             os.makedirs(os.path.dirname(export_HTML), exist_ok=True)
@@ -1299,5 +1760,5 @@ def MolTo3DGrid_old(
             print(f"HTML export successful: {export_HTML}")
         except Exception as e:
             print(f"Error exporting HTML to '{export_HTML}': {e}")
-    
+
     viewer.show()
