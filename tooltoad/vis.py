@@ -645,7 +645,7 @@ def MolTo3DGrid(
     mols,
     show_labels=False,
     show_confs: bool = True,
-    background_color='white',
+    background_color=('blue', 0.1),
     export_HTML='none',
     cell_size=(400, 400),
     columns=3,
@@ -828,7 +828,7 @@ def MolTo3DGrid(
         width=total_width, height=total_height,
         viewergrid=(rows, columns), linked=linked
     )
-    viewer.setBackgroundColor(background_color)
+    viewer.setBackgroundColor(background_color[0], background_color[1])
 
     # Display each conformer
     for idx, (m_idx, conf_id) in enumerate(mol_conf_pairs):
@@ -1010,7 +1010,7 @@ def MolTo3DGrid(
 def RxnTo3DGrid(
     rxn,
     show_labels: bool = False,
-    background_color: str = 'white',
+    background_color: tuple = ('blue', 0.1),
     export_HTML: str = 'none',
     cell_size=(400, 400),
     linked: bool = False,
@@ -1605,7 +1605,7 @@ def RxnTo3DGrid(
         viewergrid=(rows, cols),
         linked=linked,
     )
-    viewer.setBackgroundColor(background_color)
+    viewer.setBackgroundColor(background_color[0], background_color[1])
 
     # left: reactants
     _add_side_to_viewer(left_side, viewer, (0, 0), legends[0])
