@@ -235,6 +235,8 @@ def DrawMolSvg(
         ValueError: If the SMILES cannot be parsed or indices are invalid.
         TypeError: If highlight indices are not integers.
     """
+    from rdkit.Chem.Draw import rdMolDraw2D
+    from IPython.display import SVG
 
     if isinstance(mol_or_smiles, str):
         mol = Chem.MolFromSmiles(mol_or_smiles)
