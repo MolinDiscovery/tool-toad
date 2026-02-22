@@ -173,6 +173,191 @@ def draw2d(
     return img
 
 
+def DrawMolSvg(
+    mol_or_smiles,
+    w=200,
+    h=200,
+    fixed_bond_length=40,
+    bond_line_width=2,
+    use_aromatic_circle=True,
+    add_atom_indices=False,
+    kekulize=True,
+    show=True,
+    to_var=False,
+    highlight_atom_indices=None,
+    highlight_color=(0.90, 0.62, 0.00, 0.85),
+    highlight_radius=None,
+    highlight_as_circles=False,
+    fill_highlights=None,
+    dim_others=False,
+    dim_color=(0.6, 0.6, 0.6),
+    dim_bonds=True,
+    dim_atomic_nums=(6,),
+):
+    """Render a clean 2D SVG depiction of a molecule with options to reduce
+    visual crowding and highlight specific atoms.
+
+    This helper is intended for figures where default RDKit depictions can
+    appear cluttered (e.g., dense carbon frameworks or overlapping highlights).
+    It provides control over bond lengths, line widths, selective dimming, and
+    atom highlighting so key features stand out clearly.
+
+    Accepts either an RDKit ``Chem.Mol`` or a SMILES string, generates 2D
+    coordinates, and renders the molecule using ``MolDraw2DSVG``. By default
+    the SVG is displayed inline and can optionally be returned.
+
+    Args:
+        mol_or_smiles: An RDKit molecule (``Chem.Mol``) or a SMILES string.
+        w: SVG canvas width in pixels.
+        h: SVG canvas height in pixels.
+        fixed_bond_length: Fixed bond length used by the drawer.
+        bond_line_width: Bond line width.
+        use_aromatic_circle: Depict aromatic rings with circles.
+        add_atom_indices: If True, draw atom indices.
+        kekulize: If True, attempt to kekulize before drawing.
+        show: If True, display the SVG inline.
+        to_var: If True, return the SVG object.
+
+        highlight_atom_indices: Atom index or iterable of indices to highlight.
+        highlight_color: RGBA tuple for highlighted atoms.
+        highlight_radius: Optional radius override for highlights.
+        highlight_as_circles: Draw highlights as circles.
+        fill_highlights: Whether highlight regions are filled.
+        dim_others: Dim specified elements (e.g., carbon) to de-emphasize them.
+        dim_color: RGB(A) tuple for dimmed atoms/bonds (RGB used).
+        dim_bonds: Also dim bonds when dimming atoms.
+        dim_atomic_nums: Atomic numbers to dim (default: carbon).
+
+    Returns:
+        If ``to_var`` is True, an ``IPython.display.SVG`` object; otherwise None.
+
+    Raises:
+        ValueError: If the SMILES cannot be parsed or indices are invalid.
+        TypeError: If highlight indices are not integers.
+    """
+
+    if isinstance(mol_or_smiles, str):
+        mol = Chem.MolFromSmiles(mol_or_smiles)
+        if mol is None:
+            raise ValueError("Could not parse SMILES.")
+    else:
+        mol = mol_or_smiles
+        if mol is None:
+            raise ValueError("mol_or_smiles is None.")
+
+    mol = Chem.Mol(mol)
+
+    rdDepictor.SetPreferCoordGen(True)
+    rdDepictor.Compute2DCoords(mol)
+
+    if kekulize:
+        try:
+            Chem.Kekulize(mol, clearAromaticFlags=True)
+        except Exception:
+            pass
+
+    drawer = rdMolDraw2D.MolDraw2DSVG(w, h)
+    opts = drawer.drawOptions()
+    opts.useAromaticCircle = use_aromatic_circle
+    opts.bondLineWidth = bond_line_width
+    opts.fixedBondLength = fixed_bond_length
+    opts.addAtomIndices = add_atom_indices
+    opts.addStereoAnnotation = False
+    opts.prepareMolsBeforeDrawing = False
+
+    if dim_others:
+        # Dim only selected elements (default: carbon) so hetero colors remain.
+        if dim_atomic_nums is None:
+            atomic_nums = {a.GetAtomicNum() for a in mol.GetAtoms()}
+        else:
+            atomic_nums = set(dim_atomic_nums)
+
+        palette_update = {anum: dim_color[:3] for anum in atomic_nums}
+        try:
+            opts.updateAtomPalette(palette_update)
+        except Exception:
+            try:
+                opts.useBWAtomPalette()
+                opts.updateAtomPalette(palette_update)
+            except Exception:
+                pass
+
+        if dim_bonds:
+            for meth in (
+                "setBondLineColour",
+                "setDefaultBondColour",
+                "setDefaultBondColor",
+            ):
+                if hasattr(opts, meth):
+                    try:
+                        getattr(opts, meth)(dim_color[:3])
+                        break
+                    except Exception:
+                        pass
+            else:
+                for attr in (
+                    "bondLineColour",
+                    "defaultBondColour",
+                    "defaultBondColor",
+                ):
+                    if hasattr(opts, attr):
+                        try:
+                            setattr(opts, attr, dim_color[:3])
+                            break
+                        except Exception:
+                            pass
+
+    highlight_atoms = None
+    highlight_atom_colors = None
+    highlight_atom_radii = None
+    highlight_bonds = None
+
+    if highlight_atom_indices is not None:
+        if isinstance(highlight_atom_indices, int):
+            highlight_atoms = [highlight_atom_indices]
+        else:
+            highlight_atoms = list(highlight_atom_indices)
+
+        n_atoms = mol.GetNumAtoms()
+        for idx in highlight_atoms:
+            if not isinstance(idx, int):
+                raise TypeError("highlight_atom_indices must contain ints.")
+            if idx < 0 or idx >= n_atoms:
+                raise ValueError(
+                    f"Atom index {idx} is out of range (0..{n_atoms - 1})."
+                )
+
+        if highlight_color is not None:
+            opts.setHighlightColour(highlight_color)
+            highlight_atom_colors = {idx: highlight_color for idx in highlight_atoms}
+
+        if highlight_radius is not None:
+            highlight_atom_radii = {idx: highlight_radius for idx in highlight_atoms}
+
+        if highlight_as_circles:
+            opts.atomHighlightsAreCircles = True
+
+        if fill_highlights is not None:
+            opts.fillHighlights = fill_highlights
+
+        highlight_bonds = []
+
+    drawer.DrawMolecule(
+        mol,
+        highlightAtoms=highlight_atoms,
+        highlightAtomColors=highlight_atom_colors,
+        highlightAtomRadii=highlight_atom_radii,
+        highlightBonds=highlight_bonds,
+    )
+    drawer.FinishDrawing()
+
+    svg = SVG(drawer.GetDrawingText())
+    if show:
+        display(svg)
+    if to_var:
+        return svg
+
+
 def molGrid(images: List, buffer: int = 5, out_file: str = None):
     """Creates a grid of images.
 
@@ -658,7 +843,7 @@ def MolTo3DGrid(
 ):
     """
     Displays either:
-    1) All conformers of a single RDKit molecule, or
+    1) All conformers of a single RDKit molecule (or a SMILES string), or
     2) A list of RDKit molecules (each with one or more conformers),
     in a grid using py3Dmol. In addition to 3D rendering, this function can:
 
@@ -670,17 +855,18 @@ def MolTo3DGrid(
       - Measure and label the distance between two atoms on Ctrl-click.
 
     Args:
-        mols (rdkit.Chem.Mol or list of rdkit.Chem.Mol):
-            A single RDKit molecule or a list of molecules, each with 0+ 3D
-            conformers.
+        mols (rdkit.Chem.Mol or str or list[rdkit.Chem.Mol | str]):
+            A single RDKit molecule, a SMILES string, an '.xyz' filepath,
+            or a list of these. Each resulting molecule may have 0+ 3D
+            conformers. If a molecule has no conformers, one will be embedded.
         show_labels (bool):
-            If True, pre-draw atom labels (from `atomNote` or atom index) and
-            enable click-toggle. If False, only click-toggle is enabled.
+            If True, pre-draw atom labels (from `atomNote` or atom index).
+            Clicking atoms toggles a label regardless.
         show_confs (bool):
             If True (default), display every conformer of each mol.
             If False, only the first conformer (confId=0) is shown.
-        background_color (str):
-            Background color for the viewer (e.g. 'white', 'black').
+        background_color (tuple[str, float]):
+            (color, opacity) for the viewer background, e.g. ('white', 1.0).
         export_HTML (str):
             If not 'none', path used to write out an HTML file of the grid
             view.
@@ -698,6 +884,7 @@ def MolTo3DGrid(
             Zero-based atom indices to highlight per molecule.
         bonds_to_remove (list of tuple of int):
             Pairs of atom indices whose bond should be removed before display.
+            Applied to every molecule.
             e.g. [(10, 41), (10, 12), (11, 41)]
         show_charges (bool):
             Show charges in 3D space.
@@ -722,8 +909,12 @@ def MolTo3DGrid(
     def _coerce_to_mol(item):
         if isinstance(item, Chem.Mol):
             return item
+
         if isinstance(item, (str, os.PathLike)):
-            p = Path(item)
+            s = str(item)
+            p = Path(s)
+
+            # If it's an existing .xyz file, treat it as XYZ
             if p.suffix.lower() == ".xyz" and p.is_file():
                 # Prefer tooltoad chemutils if available
                 if _chemutils is not None:
@@ -733,6 +924,7 @@ def MolTo3DGrid(
                         )
                     except Exception:
                         pass
+
                 # Fallback: raw RDKit + bond perception
                 block = p.read_text()
                 mol = Chem.MolFromXYZBlock(block)
@@ -748,9 +940,18 @@ def MolTo3DGrid(
                 except Exception:
                     pass
                 return mol
+
+            # Otherwise: treat it as a SMILES string
+            mol = Chem.MolFromSmiles(s)
+            if mol is None:
+                raise ValueError(
+                    f"Could not parse SMILES string (and not an .xyz file): {s}"
+                )
+            return mol
+
         raise TypeError(
-            "mols must be an RDKit Mol, a list of Mols, a '.xyz' filepath, "
-            "or a list of '.xyz' filepaths."
+            "mols must be an RDKit Mol, a list of Mols, a SMILES string, "
+            "a '.xyz' filepath, or a list of those."
         )
 
     # Wrap single input into list
@@ -858,7 +1059,7 @@ def MolTo3DGrid(
             label += f" c{conf_id+1}"
         viewer.addLabel(
             label,
-            {'fontColor': 'black', 'backgroundColor': 'white',
+            {'fontColor': 'black', 'fontSize': 13, 'backgroundColor': 'white',
              'borderColor': 'black', 'borderWidth': 1, 'useScreen': True,
              'inFront': True, 'screenOffset': {'x': 10, 'y': 0}},
             viewer=(row, col)
@@ -1018,7 +1219,7 @@ def RxnTo3DGrid(
     show_charges: bool = True,
     legends=None,
     show_bond_changes: bool = False,
-    h_mode: str = "none",          # "none" | "reactive" | "all"
+    h_mode: str = "reactive",          # "none" | "reactive" | "all"
     show_charge_changes: bool = False,
     check_reaction_stoichiometry: bool = False
 ):
