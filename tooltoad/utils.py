@@ -19,21 +19,19 @@ STANDARD_PROPERTIES = {"xtb": {"total energy": "electronic_energy"}, "orca": {}}
 def stream(
     cmd: str, cwd: None | Path = None, shell: bool = True
 ) -> Generator[str, None, None]:
-    """Execute a command and stream stdout and stderr concurrently."""
+    """Execute a command and stream combined stdout/stderr."""
     with subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,  # Use text mode for string-based reading
+        stderr=subprocess.STDOUT,
+        text=True,
         shell=shell,
         cwd=cwd,
-        preexec_fn=os.setsid,  # Start a new process group for better control
-        bufsize=1,  # Line-buffered output for immediate feedback
+        preexec_fn=os.setsid,
+        bufsize=1,
     ) as process:
         try:
             for line in iter(process.stdout.readline, ""):
-                yield line
-            for line in iter(process.stderr.readline, ""):
                 yield line
         except KeyboardInterrupt:
             print("\nCtrl+C pressed. Terminating the process...")
@@ -42,7 +40,6 @@ def stream(
             print("Process terminated.")
         finally:
             process.stdout.close()
-            process.stderr.close()
             process.wait()
 
 
