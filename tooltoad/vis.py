@@ -549,10 +549,128 @@ def show_vibs(
     vIds: list[int] | int | None = None,
     viewergrid: tuple[int, int] | None = None,
     linked: bool = True,
+    export_HTML: str | None = None,
 ):
     """Show normal mode vibration."""
     import math
+    import os
+    import re
+    from pathlib import Path
+
     import py3Dmol
+
+    def _inject_js_view_helpers(export_html_path: str) -> None:
+        html_path = Path(export_html_path)
+        html = html_path.read_text(encoding="utf-8")
+
+        grid_var_match = re.search(
+            r"var\s+(viewergrid_\d+)\s*=\s*null;",
+            html,
+        )
+        viewer_var_match = re.search(
+            r"var\s+(viewer_\d+)\s*=\s*null;",
+            html,
+        )
+
+        helper_js = None
+
+        if grid_var_match is not None:
+            grid_var = grid_var_match.group(1)
+            helper_js = f"""
+window.saveView = function(row, col) {{
+    const v = {grid_var}[row][col].getView();
+    console.log(JSON.stringify(v));
+    return v;
+}};
+
+window.saveAllViews = function() {{
+    const out = {{}};
+    for (let r = 0; r < {grid_var}.length; r++) {{
+        for (let c = 0; c < {grid_var}[r].length; c++) {{
+            if ({grid_var}[r][c]) {{
+                out[`${{r}},${{c}}`] = {grid_var}[r][c].getView();
+            }}
+        }}
+    }}
+    console.log(JSON.stringify(out, null, 2));
+    return out;
+}};
+
+window.setViewForCell = function(row, col, view) {{
+    {grid_var}[row][col].setView(view);
+    {grid_var}[row][col].render();
+}};
+
+window.applyViews = function(viewMap) {{
+    for (const key in viewMap) {{
+        const [r, c] = key.split(",").map(Number);
+        if ({grid_var}[r] && {grid_var}[r][c]) {{
+            {grid_var}[r][c].setView(viewMap[key]);
+            {grid_var}[r][c].render();
+        }}
+    }}
+}};
+
+const fixedViews = {{
+    // "0,0": [1, 2, 3, 4, 5, 6, 7, 8],
+    // "0,1": [1, 2, 3, 4, 5, 6, 7, 8],
+}};
+
+applyViews(fixedViews);
+"""
+            marker = f"{grid_var}[0][0].render();"
+
+        elif viewer_var_match is not None:
+            viewer_var = viewer_var_match.group(1)
+            helper_js = f"""
+window.saveView = function() {{
+    const v = {viewer_var}.getView();
+    console.log(JSON.stringify(v));
+    return v;
+}};
+
+window.saveAllViews = function() {{
+    const out = {{"0,0": {viewer_var}.getView()}};
+    console.log(JSON.stringify(out, null, 2));
+    return out;
+}};
+
+window.setViewForCell = function(row, col, view) {{
+    {viewer_var}.setView(view);
+    {viewer_var}.render();
+}};
+
+window.applyViews = function(viewMap) {{
+    if (viewMap["0,0"]) {{
+        {viewer_var}.setView(viewMap["0,0"]);
+        {viewer_var}.render();
+    }}
+}};
+
+const fixedViews = {{
+    // "0,0": [1, 2, 3, 4, 5, 6, 7, 8],
+}};
+
+applyViews(fixedViews);
+"""
+            marker = f"{viewer_var}.render();"
+
+        else:
+            print(
+                "Warning: could not find viewer variable in exported HTML. "
+                "Skipping JS helper injection."
+            )
+            return
+
+        if marker not in html:
+            print(
+                "Warning: could not find render marker in exported HTML. "
+                "Skipping JS helper injection."
+            )
+            return
+
+        html = html.replace(marker, helper_js + "\n" + marker, 1)
+        html_path.write_text(html, encoding="utf-8")
 
     input = results
     atoms = input["atoms"]
@@ -568,8 +686,11 @@ def show_vibs(
     alpha = 0 if transparent else 1
 
     # ---- Single-view path (original behavior) ----
-    if vIds is None or (isinstance(vIds, list) and len(vIds) == 1) \
-            or isinstance(vIds, int):
+    if (
+        vIds is None
+        or (isinstance(vIds, list) and len(vIds) == 1)
+        or isinstance(vIds, int)
+    ):
         mode_index = vId
         if isinstance(vIds, int):
             mode_index = vIds
@@ -585,17 +706,31 @@ def show_vibs(
 
         propmap = []
         for j, m in enumerate(mode):
-            propmap.append({"index": j, "props": {
-                "dx": m[0], "dy": m[1], "dz": m[2]}})
+            propmap.append(
+                {"index": j, "props": {"dx": m[0], "dy": m[1], "dz": m[2]}}
+            )
         p.mapAtomProperties(propmap)
         p.vibrate(numFrames, amplitude, True)
-        p.animate({"loop": "backAndForth",
-                   "interval": interval_ms, "reps": reps})
+        p.animate(
+            {"loop": "backAndForth", "interval": interval_ms, "reps": reps}
+        )
         p.setStyle({"sphere": {"radius": 0.4}, "stick": {}})
 
         p.setBackgroundColor(color, alpha)
         p.zoomTo()
         print(f"Normal mode {mode_index} with frequency {frequency} cm^-1")
+
+        if export_HTML:
+            try:
+                export_dir = os.path.dirname(export_HTML)
+                if export_dir:
+                    os.makedirs(export_dir, exist_ok=True)
+                p.write_html(export_HTML)
+                _inject_js_view_helpers(export_HTML)
+                print(f"HTML export successful: {export_HTML}")
+            except Exception as e:
+                print(f"Error exporting HTML to '{export_HTML}': {e}")
+
         return p
 
     # ---- Grid path (multiple modes) ----
@@ -611,8 +746,12 @@ def show_vibs(
     else:
         rows, cols = viewergrid
 
-    p = py3Dmol.view(width=width, height=height,
-                     viewergrid=(rows, cols), linked=linked)
+    p = py3Dmol.view(
+        width=width,
+        height=height,
+        viewergrid=(rows, cols),
+        linked=linked,
+    )
 
     # Build each cell
     for i, mi in enumerate(mode_indices):
@@ -625,19 +764,36 @@ def show_vibs(
 
         propmap = []
         for j, m in enumerate(mode):
-            propmap.append({"index": j, "props": {
-                "dx": m[0], "dy": m[1], "dz": m[2]}})
+            propmap.append(
+                {"index": j, "props": {"dx": m[0], "dy": m[1], "dz": m[2]}}
+            )
         p.mapAtomProperties(propmap, viewer=(r, c))
 
         # per-cell vibrate + animate
         p.vibrate(numFrames, amplitude, True, viewer=(r, c))
-        p.animate({"loop": "backAndForth",
-                   "interval": interval_ms, "reps": reps}, viewer=(r, c))
+        p.animate(
+            {"loop": "backAndForth", "interval": interval_ms, "reps": reps},
+            viewer=(r, c),
+        )
 
-        p.setStyle({"sphere": {"radius": 0.4}, "stick": {}}, viewer=(r, c))
+        p.setStyle(
+            {"sphere": {"radius": 0.4}, "stick": {}},
+            viewer=(r, c),
+        )
         p.setBackgroundColor(color, alpha, viewer=(r, c))
         p.zoomTo(viewer=(r, c))
         print(f"Normal mode {mi} with frequency {frequency} cm^-1")
+
+    if export_HTML:
+        try:
+            export_dir = os.path.dirname(export_HTML)
+            if export_dir:
+                os.makedirs(export_dir, exist_ok=True)
+            p.write_html(export_HTML)
+            _inject_js_view_helpers(export_HTML)
+            print(f"HTML export successful: {export_HTML}")
+        except Exception as e:
+            print(f"Error exporting HTML to '{export_HTML}': {e}")
 
     return p
 
@@ -829,6 +985,563 @@ def align_axes(axes, align_values):
 
 
 def MolTo3DGrid(
+    mols: Chem.Mol | str | os.PathLike | list[Chem.Mol | str | os.PathLike],
+    show_labels: bool = False,
+    show_confs: bool = True,
+    background_color: tuple[str, float] = ('blue', 0.1),
+    export_HTML: str = 'none',
+    cell_size: tuple[int, int] = (400, 400),
+    columns: int = 3,
+    linked: bool = False,
+    kekulize: bool = True,
+    legends: list[str] | None = None,
+    highlightAtoms: list[int] | list[list[int]] | None = None,
+    bonds_to_remove: list[tuple[int, int]] | None = None,
+    show_charges: bool = True,
+):
+    """
+    Display one or more molecules in an interactive 3D py3Dmol grid.
+
+    The function accepts RDKit molecules, SMILES strings, ``.xyz`` file paths,
+    or a list containing any mix of these. Molecules without conformers are
+    embedded automatically in 3D. The grid can show either all conformers of
+    each molecule or only the first conformer.
+
+    Each cell supports interactive inspection:
+        - click one atom to toggle its index label
+        - Ctrl-click two atoms to measure a distance
+        - Shift-click three atoms to measure an angle
+
+    The viewer can also show per-cell legends, pre-draw atom labels, highlight
+    selected atoms, remove selected bonds before rendering, display formal
+    charges, link viewer motion across cells, and export the result to HTML.
+    When exported, the HTML is patched with JavaScript helpers for saving and
+    reapplying views.
+
+    Args:
+        mols (rdkit.Chem.Mol | str | os.PathLike | list):
+            A molecule, SMILES string, ``.xyz`` file path, or a list of these.
+
+        show_labels (bool, optional):
+            If ``True``, draw atom labels before rendering. Labels use
+            ``atomNote`` when present, otherwise atom indices. Defaults to
+            ``False``.
+
+        show_confs (bool, optional):
+            If ``True``, show every conformer of each molecule. If ``False``,
+            only conformer ``0`` is shown. Defaults to ``True``.
+
+        background_color (tuple[str, float], optional):
+            Viewer background as ``(color, opacity)``. Defaults to
+            ``('blue', 0.1)``.
+
+        export_HTML (str, optional):
+            Output path for HTML export. Use ``'none'`` to disable export.
+            Defaults to ``'none'``.
+
+        cell_size (tuple[int, int], optional):
+            Width and height of each grid cell in pixels. Defaults to
+            ``(400, 400)``.
+
+        columns (int, optional):
+            Number of grid columns. Rows are computed automatically. Defaults to
+            ``3``.
+
+        linked (bool, optional):
+            If ``True``, link rotation and zoom across all cells. Defaults to
+            ``False``.
+
+        kekulize (bool, optional):
+            Passed to ``Chem.MolToMolBlock`` before display. Defaults to
+            ``True``.
+
+        legends (list[str] | None, optional):
+            Legend text for each input molecule. If omitted, default labels are
+            used. Conformer numbers are appended automatically when needed.
+            Defaults to ``None``.
+
+        highlightAtoms (list[int] | list[list[int]] | None, optional):
+            Atom indices to highlight in red. Provide one list per molecule, or a
+            single list for a single molecule. Defaults to ``None``.
+
+        bonds_to_remove (list[tuple[int, int]] | None, optional):
+            Bonds to remove before display, given as atom-index pairs. Applied to
+            a temporary copy used only for visualization. Defaults to ``None``.
+
+        show_charges (bool, optional):
+            If ``True``, display non-zero formal charges in 3D. Defaults to
+            ``True``.
+
+    Returns:
+        None
+
+    Raises:
+        TypeError:
+            If the input type is unsupported.
+
+        ValueError:
+            If a SMILES or ``.xyz`` input cannot be parsed, or if ``legends`` or
+            ``highlightAtoms`` has the wrong format or length.
+    """
+    import os
+    import math
+    import re
+    from pathlib import Path
+
+    import py3Dmol
+    from rdkit import Chem
+    from rdkit.Chem import AllChem, rdDetermineBonds
+    from rdkit.Chem.rdchem import RWMol
+
+    try:
+        from tooltoad.utils import chemutils as _chemutils
+    except Exception:
+        _chemutils = None
+
+    def _inject_js_view_helpers(export_html_path):
+        html_path = Path(export_html_path)
+        html = html_path.read_text(encoding='utf-8')
+
+        grid_var_match = re.search(
+            r"var\s+(viewergrid_\d+)\s*=\s*null;",
+            html,
+        )
+        if not grid_var_match:
+            print(
+                "Warning: could not find viewer grid variable in exported "
+                "HTML. Skipping JS helper injection."
+            )
+            return
+
+        grid_var = grid_var_match.group(1)
+
+        helper_js = f"""
+window.saveView = function(row, col) {{
+    const v = {grid_var}[row][col].getView();
+    console.log(JSON.stringify(v));
+    return v;
+}};
+
+window.saveAllViews = function() {{
+    const out = {{}};
+    for (let r = 0; r < {grid_var}.length; r++) {{
+        for (let c = 0; c < {grid_var}[r].length; c++) {{
+            if ({grid_var}[r][c]) {{
+                out[`${{r}},${{c}}`] = {grid_var}[r][c].getView();
+            }}
+        }}
+    }}
+    console.log(JSON.stringify(out, null, 2));
+    return out;
+}};
+
+window.setViewForCell = function(row, col, view) {{
+    {grid_var}[row][col].setView(view);
+    {grid_var}[row][col].render();
+}};
+
+window.applyViews = function(viewMap) {{
+    for (const key in viewMap) {{
+        const [r, c] = key.split(',').map(Number);
+        if ({grid_var}[r] && {grid_var}[r][c]) {{
+            {grid_var}[r][c].setView(viewMap[key]);
+            {grid_var}[r][c].render();
+        }}
+    }}
+}};
+
+const fixedViews = {{
+    // [0,0]: [...],
+    // [0,1]: [...],
+}};
+
+applyViews(fixedViews);
+
+"""
+
+        marker = f"{grid_var}[0][0].render();"
+        if marker not in html:
+            print(
+                "Warning: could not find render marker in exported HTML. "
+                "Skipping JS helper injection."
+            )
+            return
+
+        html = html.replace(marker, helper_js + "\n" + marker, 1)
+        html_path.write_text(html, encoding='utf-8')
+
+    # --- helper: coerce any RDKit Mol / '.xyz' path to RDKit Mol ---------
+    def _coerce_to_mol(item):
+        if isinstance(item, Chem.Mol):
+            return item
+
+        if isinstance(item, (str, os.PathLike)):
+            s = str(item)
+            p = Path(s)
+
+            # If it's an existing .xyz file, treat it as XYZ
+            if p.suffix.lower() == ".xyz" and p.is_file():
+                # Prefer tooltoad chemutils if available
+                if _chemutils is not None:
+                    try:
+                        return _chemutils.read_xyz_file(
+                            str(p), return_mol=True, useHueckel=True
+                        )
+                    except Exception:
+                        pass
+
+                # Fallback: raw RDKit + bond perception
+                block = p.read_text()
+                mol = Chem.MolFromXYZBlock(block)
+                if mol is None:
+                    raise ValueError(f"Could not parse XYZ file: {p}")
+                try:
+                    rdDetermineBonds.DetermineConnectivity(
+                        mol, useHueckel=True
+                    )
+                except Exception:
+                    # If Hueckel fails, leave as-is; viewer can still show
+                    # coords
+                    pass
+                try:
+                    Chem.SanitizeMol(mol)
+                except Exception:
+                    pass
+                return mol
+
+            # Otherwise: treat it as a SMILES string
+            mol = Chem.MolFromSmiles(s)
+            if mol is None:
+                raise ValueError(
+                    f"Could not parse SMILES string "
+                    f"(and not an .xyz file): {s}"
+                )
+            return mol
+
+        raise TypeError(
+            "mols must be an RDKit Mol, a list of Mols, a SMILES string, "
+            "a '.xyz' filepath, or a list of those."
+        )
+
+    # Wrap single input into list
+    if not isinstance(mols, list):
+        mols = [mols]
+
+    # Coerce xyz paths → RDKit Mols (via tooltoad when available)
+    mols = [_coerce_to_mol(m) for m in mols]
+
+    # Normalize highlightAtoms into list of lists
+    if highlightAtoms is None:
+        normalized_highlights = None
+    else:
+        if all(isinstance(x, int) for x in highlightAtoms):
+            normalized_highlights = [list(highlightAtoms)]
+        else:
+            try:
+                normalized_highlights = [list(seq) for seq in highlightAtoms]
+            except TypeError:
+                raise ValueError(
+                    "highlightAtoms must be a sequence of ints or sequence of "
+                    "sequences."
+                )
+        if len(normalized_highlights) != len(mols):
+            raise ValueError(
+                "Length of highlightAtoms must match number of molecules."
+            )
+
+    # Prepare legends
+    if legends is None:
+        legends = []
+    if not legends:
+        legends = [f"Mol {i+1}" for i in range(len(mols))]
+    if len(legends) != len(mols):
+        raise ValueError(
+            "Length of legends must match the number of molecules."
+        )
+
+    # Ensure 3D conformers and gather pairs
+    mol_conf_pairs = []
+    conf_counts = []
+    mols_with_multiple_confs = False
+
+    for i, mol in enumerate(mols):
+        if mol.GetNumConformers() == 0:
+            params = AllChem.ETKDGv3()
+            params.randomSeed = 0xF00D
+            res = AllChem.EmbedMolecule(mol, params)
+
+            if res != 0:
+                mol_h = Chem.AddHs(mol)
+                params = AllChem.ETKDGv3()
+                params.randomSeed = 0xF00D
+                params.useRandomCoords = True
+                res = AllChem.EmbedMolecule(mol_h, params)
+
+                if res == 0:
+                    mol = Chem.RemoveHs(mol_h)
+                else:
+                    raise ValueError(
+                        "Could not generate a 3D conformer for molecule."
+                    )
+
+        mols[i] = mol
+
+        total_confs = mol.GetNumConformers()
+        if total_confs == 0:
+            raise ValueError(
+                "Molecule has no conformers after embedding."
+            )
+
+        if show_confs:
+            conf_list = list(range(total_confs))
+            if total_confs > 1:
+                mols_with_multiple_confs = True
+        else:
+            conf_list = [0]
+
+        conf_counts.append(len(conf_list))
+
+        for conf_id in conf_list:
+            mol_conf_pairs.append((i, conf_id))
+
+    # Compute grid dimensions
+    if len(mols) == 1 and not mols_with_multiple_confs:
+        columns = 1
+    if len(mols) == 2 and not mols_with_multiple_confs:
+        columns = 2
+    total_pairs = len(mol_conf_pairs)
+    rows = math.ceil(total_pairs / columns)
+    total_width = cell_size[0] * columns
+    total_height = cell_size[1] * rows
+
+    # Create viewer
+    viewer = py3Dmol.view(
+        width=total_width,
+        height=total_height,
+        viewergrid=(rows, columns),
+        linked=linked,
+    )
+    viewer.setBackgroundColor(background_color[0], background_color[1])
+
+    # Display each conformer
+    for idx, (m_idx, conf_id) in enumerate(mol_conf_pairs):
+        mol = mols[m_idx]
+        row = idx // columns
+        col = idx % columns
+
+        # 1) copy & remove bonds
+        mol_edit = RWMol(mol)
+        if bonds_to_remove:
+            for i_b, j_b in bonds_to_remove:
+                mol_edit.RemoveBond(i_b, j_b)
+
+        # 2) render the edited mol
+        mol_block = Chem.MolToMolBlock(
+            mol_edit, confId=conf_id, kekulize=kekulize
+        )
+        viewer.addModel(mol_block, 'mol', viewer=(row, col))
+        viewer.setStyle(
+            {}, {'stick': {}, 'sphere': {'radius': 0.3}}, viewer=(row, col)
+        )
+        viewer.zoomTo(viewer=(row, col))
+
+        # Legend
+        label = legends[m_idx]
+        if conf_counts[m_idx] > 1:
+            label += f" c{conf_id+1}"
+        viewer.addLabel(
+            label,
+            {'fontColor': 'black', 'fontSize': 13,
+             'backgroundColor': 'white', 'borderColor': 'black',
+             'borderWidth': 1, 'useScreen': True, 'inFront': True,
+             'screenOffset': {'x': 10, 'y': 0}},
+            viewer=(row, col)
+        )
+
+        # Per-atom labels
+        if show_labels:
+            conf = mol.GetConformer(conf_id)
+            for atom in mol.GetAtoms():
+                idx0 = atom.GetIdx()
+                pos = conf.GetAtomPosition(idx0)
+                text = (
+                    atom.GetProp('atomNote')
+                    if atom.HasProp('atomNote')
+                    else str(idx0)
+                )
+                viewer.addLabel(
+                    text,
+                    {'position': {'x': pos.x, 'y': pos.y, 'z': pos.z},
+                     'fontColor': 'black', 'backgroundColor': 'white',
+                     'borderThickness': 1, 'fontSize': 12},
+                    viewer=(row, col)
+                )
+
+        if show_charges:
+            conf = mol.GetConformer(conf_id)
+            for atom in mol.GetAtoms():
+                fc = atom.GetFormalCharge()
+                if fc == 0:
+                    continue
+
+                i_a = atom.GetIdx()
+                pos = conf.GetAtomPosition(i_a)
+                atom_pos = {'x': pos.x, 'y': pos.y, 'z': pos.z}
+                label_pos = {'x': pos.x, 'y': pos.y, 'z': pos.z}
+
+                color = 'red' if fc > 0 else 'blue'
+                sign = f"{abs(fc)}+" if fc > 0 else f"{abs(fc)}-"
+
+                viewer.addCylinder(
+                    {'start': atom_pos, 'end': label_pos, 'radius': 0.05,
+                     'color': color, 'fromCap': False, 'toCap': False},
+                    viewer=(row, col)
+                )
+
+                viewer.addLabel(
+                    sign,
+                    {'position': label_pos, 'inFront': True,
+                     'fontSize': 16, 'fontColor': color,
+                     'fontWeight': 'bold',
+                     'backgroundColor': 'rgba(255,255,255,0)',
+                     'backgroundOpacity': 0.6},
+                    viewer=(row, col)
+                )
+
+        viewer.setClickable(
+            {}, True,
+            '''function(atom, viewer, event, container) {
+                if(!viewer._picks)       viewer._picks = [];
+                if(!viewer._distLabels)  viewer._distLabels = {};
+                if(!viewer._anglePicks)  viewer._anglePicks = [];
+                if(!viewer._angleLabels) viewer._angleLabels = {};
+
+                // Shift-click: angle
+                if(event.shiftKey) {
+                    viewer._anglePicks.push(atom);
+                    if(viewer._anglePicks.length === 3) {
+                        var A = viewer._anglePicks[0],
+                            B = viewer._anglePicks[1],
+                            C = viewer._anglePicks[2];
+                        var key = [A.index,B.index,C.index].join('-');
+                        if(key in viewer._angleLabels) {
+                            viewer.removeLabel(viewer._angleLabels[key]);
+                            delete viewer._angleLabels[key];
+                        } else {
+                            function vec(u,v){
+                                return {
+                                    x:u.x-v.x,
+                                    y:u.y-v.y,
+                                    z:u.z-v.z
+                                };
+                            };
+                            var vBA=vec(A,B), vBC=vec(C,B);
+                            var dot=vBA.x*vBC.x+vBA.y*vBC.y+vBA.z*vBC.z;
+                            var magBA=Math.sqrt(
+                                vBA.x*vBA.x+vBA.y*vBA.y+vBA.z*vBA.z
+                            );
+                            var magBC=Math.sqrt(
+                                vBC.x*vBC.x+vBC.y*vBC.y+vBC.z*vBC.z
+                            );
+                            var angle=(
+                                Math.acos(dot/(magBA*magBC))*(180/Math.PI)
+                            ).toFixed(2)+'°';
+                            var lbl = viewer.addLabel(
+                                angle,
+                                {
+                                    position:{x:B.x,y:B.y,z:B.z},
+                                    backgroundColor:'blue',
+                                    fontColor:'white',
+                                    fontSize:12
+                                }
+                            );
+                            viewer._angleLabels[key] = lbl;
+                        }
+                        viewer._anglePicks = [];
+                    }
+                }
+                // Ctrl-click: distance
+                else if(event.ctrlKey) {
+                    viewer._picks.push(atom);
+                    if(viewer._picks.length === 2) {
+                        var a=viewer._picks[0], b=viewer._picks[1];
+                        var key=[
+                            Math.min(a.index,b.index),
+                            Math.max(a.index,b.index)
+                        ].join('-');
+                        if(key in viewer._distLabels) {
+                            viewer.removeLabel(viewer._distLabels[key]);
+                            delete viewer._distLabels[key];
+                        } else {
+                            var dx=a.x-b.x, dy=a.y-b.y, dz=a.z-b.z;
+                            var dist=Math.sqrt(dx*dx+dy*dy+dz*dz)
+                                      .toFixed(3)+' Å';
+                            var mid={
+                                x:(a.x+b.x)/2,
+                                y:(a.y+b.y)/2,
+                                z:(a.z+b.z)/2
+                            };
+                            var lbl=viewer.addLabel(
+                                dist,
+                                {
+                                    position:mid,
+                                    backgroundColor:'grey',
+                                    fontColor:'white',
+                                    fontSize:12
+                                }
+                            );
+                            viewer._distLabels[key]=lbl;
+                        }
+                        viewer._picks = [];
+                    }
+                }
+                // Click: toggle label
+                else {
+                    if(atom.label) {
+                        viewer.removeLabel(atom.label);
+                        delete atom.label;
+                    } else {
+                        atom.label = viewer.addLabel(
+                            atom.index,
+                            {
+                                position:atom,
+                                backgroundColor:'white',
+                                fontColor:'black',
+                                fontSize:12
+                            }
+                        );
+                    }
+                }
+                viewer.render();
+            }'''
+        )
+
+        # Highlight atoms if requested
+        if normalized_highlights is not None:
+            atoms_sel = normalized_highlights[m_idx]
+            viewer.setStyle(
+                {'serial': atoms_sel},
+                {'stick': {'radius': 0.2, 'color': 'red'},
+                 'sphere': {'radius': 0.4, 'color': 'red'}},
+                viewer=(row, col)
+            )
+
+    # Export HTML if requested
+    if export_HTML != 'none':
+        try:
+            export_dir = os.path.dirname(export_HTML)
+            if export_dir:
+                os.makedirs(export_dir, exist_ok=True)
+            viewer.write_html(export_HTML)
+            _inject_js_view_helpers(export_HTML)
+            print(f"HTML export successful: {export_HTML}")
+        except Exception as e:
+            print(f"Error exporting HTML to '{export_HTML}': {e}")
+
+    viewer.show()
+
+
+def MolTo3DGrid_old(
     mols,
     show_labels=False,
     show_confs: bool = True,
