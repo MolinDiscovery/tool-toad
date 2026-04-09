@@ -1,31 +1,26 @@
-#__init__.py
+"""Public package exports for tooltoad."""
 
-# core utility submodules
-from .chemutils      import *
-from .vis            import *
-
-# quantum‐chemistry interfaces
-from .orca           import orca_calculate
-from .xtb            import xtb_calculate
-
-from .orca import orca
-from .xtb  import xtb
-
-# data providers
-from .periodictable  import PeriodicTable
-
-# convenience imports
-from .crest          import run_crest
+from . import chemutils, thermochemistry, vis
+from .chemutils import *
+from .vis import *
+from .orca import orca_calculate
+from .xtb import xtb_calculate
+from .periodictable import PeriodicTable
+from .crest import run_crest
 from .thermochemistry import *
 
-__all__ = [
-    *chemutils.__all__,
-    *vis.__all__,
+# Backward-compatible short aliases used by some downstream code.
+orca = orca_calculate
+xtb = xtb_calculate
 
-    # direct functions
+__all__ = [
+    *getattr(chemutils, "__all__", []),
+    *getattr(vis, "__all__", []),
+    *getattr(thermochemistry, "__all__", []),
+    "orca",
     "orca_calculate",
+    "xtb",
     "xtb_calculate",
     "PeriodicTable",
-    "CM5Charges",
     "run_crest",
 ]
