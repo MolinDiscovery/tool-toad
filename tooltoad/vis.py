@@ -193,23 +193,24 @@ def DrawMolSvg(
     dim_color=(0.6, 0.6, 0.6),
     dim_bonds=True,
     dim_atomic_nums=(6,),
+    columns=3,
+    legends=None,
 ):
-    """Render a clean 2D SVG depiction of a molecule with options to reduce
-    visual crowding and highlight specific atoms.
+    """Render clean 2D SVG depictions of one or more molecules.
 
     This helper is intended for figures where default RDKit depictions can
     appear cluttered (e.g., dense carbon frameworks or overlapping highlights).
     It provides control over bond lengths, line widths, selective dimming, and
     atom highlighting so key features stand out clearly.
 
-    Accepts either an RDKit ``Chem.Mol`` or a SMILES string, generates 2D
-    coordinates, and renders the molecule using ``MolDraw2DSVG``. By default
-    the SVG is displayed inline and can optionally be returned.
+    Accepts either a single RDKit ``Chem.Mol`` / SMILES string or a list of
+    them. A single molecule is drawn as one SVG. Multiple molecules are drawn
+    in a grid using the same depiction settings for each panel.
 
     Args:
-        mol_or_smiles: An RDKit molecule (``Chem.Mol``) or a SMILES string.
-        w: SVG canvas width in pixels.
-        h: SVG canvas height in pixels.
+        mol_or_smiles: An RDKit molecule, a SMILES string, or a list of these.
+        w: Width of each molecule panel in pixels.
+        h: Height of each molecule panel in pixels.
         fixed_bond_length: Fixed bond length used by the drawer.
         bond_line_width: Bond line width.
         use_aromatic_circle: Depict aromatic rings with circles.
@@ -217,8 +218,8 @@ def DrawMolSvg(
         kekulize: If True, attempt to kekulize before drawing.
         show: If True, display the SVG inline.
         to_var: If True, return the SVG object.
-
-        highlight_atom_indices: Atom index or iterable of indices to highlight.
+        highlight_atom_indices: Atom index / iterable of indices for one
+            molecule, or a list of such iterables for multiple molecules.
         highlight_color: RGBA tuple for highlighted atoms.
         highlight_radius: Optional radius override for highlights.
         highlight_as_circles: Draw highlights as circles.
@@ -227,48 +228,64 @@ def DrawMolSvg(
         dim_color: RGB(A) tuple for dimmed atoms/bonds (RGB used).
         dim_bonds: Also dim bonds when dimming atoms.
         dim_atomic_nums: Atomic numbers to dim (default: carbon).
+        columns: Number of grid columns when drawing multiple molecules.
+        legends: Optional legend string for each molecule.
 
     Returns:
         If ``to_var`` is True, an ``IPython.display.SVG`` object; otherwise None.
 
     Raises:
-        ValueError: If the SMILES cannot be parsed or indices are invalid.
+        ValueError: If a SMILES cannot be parsed or indices are invalid.
         TypeError: If highlight indices are not integers.
     """
+    import math
+
+    from IPython.display import SVG, display
     from rdkit.Chem.Draw import rdMolDraw2D
-    from IPython.display import SVG
 
-    if isinstance(mol_or_smiles, str):
-        mol = Chem.MolFromSmiles(mol_or_smiles)
-        if mol is None:
-            raise ValueError("Could not parse SMILES.")
-    else:
-        mol = mol_or_smiles
-        if mol is None:
+    def _is_mol_list_like(obj):
+        return isinstance(obj, list)
+
+    def _to_mol(item):
+        if isinstance(item, str):
+            mol = Chem.MolFromSmiles(item)
+            if mol is None:
+                raise ValueError("Could not parse SMILES.")
+            return mol
+        if item is None:
             raise ValueError("mol_or_smiles is None.")
+        return item
 
-    mol = Chem.Mol(mol)
+    def _prepare_mol(mol):
+        mol = Chem.Mol(mol)
+        rdDepictor.SetPreferCoordGen(True)
+        rdDepictor.Compute2DCoords(mol)
 
-    rdDepictor.SetPreferCoordGen(True)
-    rdDepictor.Compute2DCoords(mol)
+        if kekulize:
+            try:
+                Chem.Kekulize(mol, clearAromaticFlags=True)
+            except Exception:
+                pass
+        return mol
 
-    if kekulize:
-        try:
-            Chem.Kekulize(mol, clearAromaticFlags=True)
-        except Exception:
-            pass
+    def _apply_common_options(opts):
+        opts.useAromaticCircle = use_aromatic_circle
+        opts.bondLineWidth = bond_line_width
+        opts.fixedBondLength = fixed_bond_length
+        opts.addAtomIndices = add_atom_indices
+        opts.addStereoAnnotation = False
+        opts.prepareMolsBeforeDrawing = False
 
-    drawer = rdMolDraw2D.MolDraw2DSVG(w, h)
-    opts = drawer.drawOptions()
-    opts.useAromaticCircle = use_aromatic_circle
-    opts.bondLineWidth = bond_line_width
-    opts.fixedBondLength = fixed_bond_length
-    opts.addAtomIndices = add_atom_indices
-    opts.addStereoAnnotation = False
-    opts.prepareMolsBeforeDrawing = False
+        if highlight_as_circles:
+            opts.atomHighlightsAreCircles = True
 
-    if dim_others:
-        # Dim only selected elements (default: carbon) so hetero colors remain.
+        if fill_highlights is not None:
+            opts.fillHighlights = fill_highlights
+
+    def _apply_dim_options(opts, mol):
+        if not dim_others:
+            return
+
         if dim_atomic_nums is None:
             atomic_nums = {a.GetAtomicNum() for a in mol.GetAtoms()}
         else:
@@ -309,18 +326,48 @@ def DrawMolSvg(
                         except Exception:
                             pass
 
-    highlight_atoms = None
-    highlight_atom_colors = None
-    highlight_atom_radii = None
-    highlight_bonds = None
+    def _normalize_highlights(highlights, n_mols):
+        if highlights is None:
+            return [None] * n_mols
 
-    if highlight_atom_indices is not None:
-        if isinstance(highlight_atom_indices, int):
-            highlight_atoms = [highlight_atom_indices]
-        else:
-            highlight_atoms = list(highlight_atom_indices)
+        if n_mols == 1:
+            if isinstance(highlights, int):
+                return [[highlights]]
+            return [list(highlights)]
 
+        if isinstance(highlights, list) and len(highlights) == n_mols:
+            normalized = []
+            for entry in highlights:
+                if entry is None:
+                    normalized.append(None)
+                elif isinstance(entry, int):
+                    normalized.append([entry])
+                else:
+                    normalized.append(list(entry))
+            return normalized
+
+        raise ValueError(
+            "For multiple molecules, highlight_atom_indices must be a list "
+            "with one entry per molecule."
+        )
+
+    def _validate_and_build_highlights(mol, atom_indices):
+        highlight_atoms = None
+        highlight_atom_colors = None
+        highlight_atom_radii = None
+        highlight_bonds = None
+
+        if atom_indices is None:
+            return (
+                highlight_atoms,
+                highlight_atom_colors,
+                highlight_atom_radii,
+                highlight_bonds,
+            )
+
+        highlight_atoms = list(atom_indices)
         n_atoms = mol.GetNumAtoms()
+
         for idx in highlight_atoms:
             if not isinstance(idx, int):
                 raise TypeError("highlight_atom_indices must contain ints.")
@@ -330,26 +377,159 @@ def DrawMolSvg(
                 )
 
         if highlight_color is not None:
-            opts.setHighlightColour(highlight_color)
-            highlight_atom_colors = {idx: highlight_color for idx in highlight_atoms}
+            highlight_atom_colors = {
+                idx: highlight_color for idx in highlight_atoms
+            }
 
         if highlight_radius is not None:
-            highlight_atom_radii = {idx: highlight_radius for idx in highlight_atoms}
-
-        if highlight_as_circles:
-            opts.atomHighlightsAreCircles = True
-
-        if fill_highlights is not None:
-            opts.fillHighlights = fill_highlights
+            highlight_atom_radii = {
+                idx: highlight_radius for idx in highlight_atoms
+            }
 
         highlight_bonds = []
 
-    drawer.DrawMolecule(
-        mol,
-        highlightAtoms=highlight_atoms,
-        highlightAtomColors=highlight_atom_colors,
-        highlightAtomRadii=highlight_atom_radii,
-        highlightBonds=highlight_bonds,
+        return (
+            highlight_atoms,
+            highlight_atom_colors,
+            highlight_atom_radii,
+            highlight_bonds,
+        )
+
+    is_multi = _is_mol_list_like(mol_or_smiles)
+    items = mol_or_smiles if is_multi else [mol_or_smiles]
+
+    mols = [_prepare_mol(_to_mol(item)) for item in items]
+    n_mols = len(mols)
+
+    highlight_lists = _normalize_highlights(highlight_atom_indices, n_mols)
+
+    if legends is None:
+        legends = ["" for _ in range(n_mols)]
+    elif len(legends) != n_mols:
+        raise ValueError("Length of legends must match number of molecules.")
+
+    if n_mols == 1:
+        mol = mols[0]
+
+        drawer = rdMolDraw2D.MolDraw2DSVG(w, h)
+        opts = drawer.drawOptions()
+        _apply_common_options(opts)
+        _apply_dim_options(opts, mol)
+
+        if highlight_color is not None:
+            opts.setHighlightColour(highlight_color)
+
+        (
+            highlight_atoms,
+            highlight_atom_colors,
+            highlight_atom_radii,
+            highlight_bonds,
+        ) = _validate_and_build_highlights(mol, highlight_lists[0])
+
+        drawer.DrawMolecule(
+            mol,
+            legend=legends[0],
+            highlightAtoms=highlight_atoms,
+            highlightAtomColors=highlight_atom_colors,
+            highlightAtomRadii=highlight_atom_radii,
+            highlightBonds=highlight_bonds,
+        )
+        drawer.FinishDrawing()
+
+        svg = SVG(drawer.GetDrawingText())
+        if show:
+            display(svg)
+        if to_var:
+            return svg
+        return None
+
+    rows = math.ceil(n_mols / columns)
+    total_w = columns * w
+    total_h = rows * h
+
+    drawer = rdMolDraw2D.MolDraw2DSVG(total_w, total_h, w, h)
+    opts = drawer.drawOptions()
+    _apply_common_options(opts)
+
+    if highlight_color is not None:
+        opts.setHighlightColour(highlight_color)
+
+    if dim_others:
+        try:
+            if dim_atomic_nums is None:
+                atomic_nums = {
+                    a.GetAtomicNum() for mol in mols for a in mol.GetAtoms()
+                }
+            else:
+                atomic_nums = set(dim_atomic_nums)
+
+            palette_update = {anum: dim_color[:3] for anum in atomic_nums}
+            opts.updateAtomPalette(palette_update)
+        except Exception:
+            try:
+                opts.useBWAtomPalette()
+                opts.updateAtomPalette(palette_update)
+            except Exception:
+                pass
+
+        if dim_bonds:
+            for meth in (
+                "setBondLineColour",
+                "setDefaultBondColour",
+                "setDefaultBondColor",
+            ):
+                if hasattr(opts, meth):
+                    try:
+                        getattr(opts, meth)(dim_color[:3])
+                        break
+                    except Exception:
+                        pass
+            else:
+                for attr in (
+                    "bondLineColour",
+                    "defaultBondColour",
+                    "defaultBondColor",
+                ):
+                    if hasattr(opts, attr):
+                        try:
+                            setattr(opts, attr, dim_color[:3])
+                            break
+                        except Exception:
+                            pass
+
+    highlight_atoms_list = []
+    highlight_atom_colors_list = []
+    highlight_atom_radii_list = []
+    highlight_bonds_list = []
+
+    for mol, atom_indices in zip(mols, highlight_lists):
+        (
+            highlight_atoms,
+            highlight_atom_colors,
+            highlight_atom_radii,
+            highlight_bonds,
+        ) = _validate_and_build_highlights(mol, atom_indices)
+
+        highlight_atoms_list.append(
+            [] if highlight_atoms is None else highlight_atoms
+        )
+        highlight_atom_colors_list.append(
+            {} if highlight_atom_colors is None else highlight_atom_colors
+        )
+        highlight_atom_radii_list.append(
+            {} if highlight_atom_radii is None else highlight_atom_radii
+        )
+        highlight_bonds_list.append(
+            [] if highlight_bonds is None else highlight_bonds
+        )
+
+    drawer.DrawMolecules(
+        mols,
+        legends=legends,
+        highlightAtoms=highlight_atoms_list,
+        highlightAtomColors=highlight_atom_colors_list,
+        highlightAtomRadii=highlight_atom_radii_list,
+        highlightBonds=highlight_bonds_list,
     )
     drawer.FinishDrawing()
 
@@ -998,6 +1178,7 @@ def MolTo3DGrid(
     highlightAtoms: list[int] | list[list[int]] | None = None,
     bonds_to_remove: list[tuple[int, int]] | None = None,
     show_charges: bool = True,
+    verbose: bool = False
 ):
     """
     Display one or more molecules in an interactive 3D py3Dmol grid.
@@ -1089,7 +1270,7 @@ def MolTo3DGrid(
     from pathlib import Path
 
     import py3Dmol
-    from rdkit import Chem
+    from rdkit import Chem, rdBase
     from rdkit.Chem import AllChem, rdDetermineBonds
     from rdkit.Chem.rdchem import RWMol
 
@@ -1268,7 +1449,11 @@ applyViews(fixedViews);
         if mol.GetNumConformers() == 0:
             params = AllChem.ETKDGv3()
             params.randomSeed = 0xF00D
-            res = AllChem.EmbedMolecule(mol, params)
+            if verbose:
+                res = AllChem.EmbedMolecule(mol, params)
+            else:
+                with rdBase.BlockLogs():
+                    res = AllChem.EmbedMolecule(mol, params)
 
             if res != 0:
                 mol_h = Chem.AddHs(mol)
