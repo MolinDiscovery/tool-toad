@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from tooltoad.chemutils import read_multi_xyz, xyz2ac
+from tooltoad.config import find_and_load_dotenv
 from tooltoad.utils import (
     STANDARD_PROPERTIES,
     WorkingDir,
@@ -17,6 +18,10 @@ from tooltoad.utils import (
 )
 
 _logger = logging.getLogger(__name__)
+
+find_and_load_dotenv()
+
+XTB_CMD = os.getenv("XTB_EXE", "xtb")
 
 
 def xtb_calculate(
@@ -30,7 +35,7 @@ def xtb_calculate(
     detailed_input: None | dict = None,
     detailed_input_str: None | str = None,
     calc_dir: None | str = None,
-    xtb_cmd: str = "xtb",
+    xtb_cmd: str = XTB_CMD,
     force: bool = False,
     data2file: None | dict = None,
 ) -> dict:
