@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import tempfile
 from pathlib import Path
 from typing import List, Optional
@@ -24,9 +25,12 @@ from rdkit.Chem.rdchem import Mol
 from rdkit.ML.Cluster import Butina
 from sklearn.cluster import DBSCAN
 
+from tooltoad.config import find_and_load_dotenv
 from tooltoad.utils import stream
 
 logger = logging.getLogger(__name__)
+
+find_and_load_dotenv()
 
 COVALENT_RADII = {
     "H": 0.31,
@@ -933,9 +937,21 @@ def gfnff_connectivity(atoms, coords, charge, multiplicity, scr):
     tmp_file = Path(calc_dir.name) / "input.xyz"
     with open(tmp_file, "w") as f:
         f.write(ac2xyz(atoms, coords))
-    CMD = f"xtb --gfnff {str(tmp_file.name)} --chrg {charge} --uhf {multiplicity-1} --norestart --wrtopo blist"
+    xtb_cmd = shlex.quote(os.getenv("XTB_EXE", "xtb"))
+    input_file = shlex.quote(str(tmp_file.name))
+    CMD = (
+        f"{xtb_cmd} --gfnff {input_file} --chrg {charge} "
+        f"--uhf {multiplicity-1} --norestart --wrtopo blist"
+    )
     _ = list(stream(CMD, cwd=calc_dir.name))
-    with open(Path(calc_dir.name) / "gfnff_lists.json", "r") as f:
+    lists_file = Path(calc_dir.name) / "gfnff_lists.json"
+    if not lists_file.exists():
+        calc_dir.cleanup()
+        raise FileNotFoundError(
+            "xTB GFN-FF connectivity did not produce gfnff_lists.json. "
+            "Check that XTB_EXE points to a regular xTB binary, not GXTB_EXE."
+        )
+    with open(lists_file, "r") as f:
         data_dict = json.load(f)
     calc_dir.cleanup()
     blist = data_dict["blist"]
