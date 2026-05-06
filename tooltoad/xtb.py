@@ -10,6 +10,7 @@ import numpy as np
 
 from tooltoad.chemutils import read_multi_xyz, xyz2ac
 from tooltoad.config import find_and_load_dotenv
+from tooltoad.hessian import xtb_hessian_to_orca_hessian
 from tooltoad.utils import (
     STANDARD_PROPERTIES,
     WorkingDir,
@@ -142,6 +143,15 @@ def xtb_calculate(
         with open(work_dir / "xtbout.json", "r") as f:
             json_data = json.load(f)
         results["json"] = json_data
+    if any(key in options for key in ("hess", "ohess")) and (work_dir / "hessian").exists():
+        hess_coords = results.get("opt_coords", coords)
+        results["input.hess"] = xtb_hessian_to_orca_hessian(
+            hessian_path=work_dir / "hessian",
+            atoms=atoms,
+            coords=hess_coords,
+            energy=results.get("electronic_energy", 0.0),
+            multiplicity=multiplicity,
+        )
     if calc_dir:
         results["calc_dir"] = str(work_dir)
     else:

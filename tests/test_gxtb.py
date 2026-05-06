@@ -1,5 +1,7 @@
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from tooltoad.gxtb import (
@@ -8,6 +10,7 @@ from tooltoad.gxtb import (
     gxtb_calculate,
     mock_gxtb_calculate,
 )
+from tooltoad.hessian import read_xtb_hessian, xtb_hessian_to_orca_hessian
 from tooltoad.xtb import read_gradients, read_xtb_results
 
 
@@ -81,6 +84,36 @@ class GxtbTests(unittest.TestCase):
         self.assertTrue(result["normal_termination"])
         self.assertEqual(result["options"], {"gxtb": None, "opt": None})
         self.assertEqual(result["opt_coords"], [[0.0, 0.0, 0.0]])
+
+    def test_xtb_hessian_can_be_written_as_orca_hess(self):
+        values = [float(i) / 10.0 for i in range(36)]
+        hessian_text = "$hessian\n" + "\n".join(
+            " ".join(f"{value: .8E}" for value in values[start : start + 6])
+            for start in range(0, len(values), 6)
+        )
+        hessian_text += "\n$end\n"
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "hessian"
+            path.write_text(hessian_text)
+
+            matrix = read_xtb_hessian(path, natoms=2)
+            orca_hess = xtb_hessian_to_orca_hessian(
+                hessian_path=path,
+                atoms=["H", "H"],
+                coords=[[0.0, 0.0, 0.0], [0.0, 0.0, 0.74]],
+                energy=-1.0,
+                multiplicity=1,
+            )
+
+        self.assertEqual(len(matrix), 6)
+        self.assertEqual(matrix[5][5], 3.5)
+        self.assertIn("$orca_hessian_file", orca_hess)
+        self.assertIn("$hessian\n6", orca_hess)
+        self.assertIn("$atoms\n2", orca_hess)
+        self.assertIn("H      1.00800", orca_hess)
+        self.assertIn("1.398397", orca_hess)
+        self.assertTrue(orca_hess.endswith("$end\n"))
 
 
 if __name__ == "__main__":
