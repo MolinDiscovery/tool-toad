@@ -2,7 +2,7 @@
 
 > [!IMPORTANT]
 > These functions require xTB or ORCA be be installed, see instructions for [xTB](https://xtb-docs.readthedocs.io/en/latest/setup.html) or [ORCA](https://www.faccts.de/docs/orca/6.0/tutorials/first_steps/install.html).
-Furthermore, follow the instructions below to set all relevant environmental variables.
+Furthermore, follow the instructions below to set all relevant paths in `.env`.
 
 <details>
   <summary>Setting paths to executables</summary>
@@ -18,12 +18,33 @@ results = xtb_calculate(
 )
 ```
 
-For `orca_calculate`, the following environmental variables must be set, for example in a `.env` file:
+For `orca_calculate`, put the following paths in `~/.env`:
+
 ```bash
 ORCA_EXE=/path/to/orca_version/orca
-OPEN_MPI_DIR=/path/to/openmpi-4.1.1/
+OPEN_MPI_DIR=${HOME}/openmpi
+XTBPATH=/path/to/xtb/share/xtb
 XTB_EXE=xtb # only required for xTB calculations via ORCA
 ```
+
+For g-xTB or downstream FRUST/OET workflows, the same `~/.env` file can also
+hold:
+
+```bash
+OET_TOOLS=/path/to/orca-external-tools
+GXTB_ROOT=/path/to/g-xtb
+GXTB_EXE=/path/to/g-xtb/bin/xtb
+```
+
+Use `${HOME}`, not bare `$HOME`, inside `.env` files. Tooltoad loads dotenv
+files in this order:
+
+1. path set by `TOOLTOAD_DOTENV_PATH`;
+2. `.env` in the current working directory;
+3. `~/.env`.
+
+Shell `export ...` commands still work for temporary sessions, CI, and job
+scripts, but stable local tool paths should normally live in `~/.env`.
 </details>
 
 
