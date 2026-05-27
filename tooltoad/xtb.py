@@ -14,15 +14,24 @@ from tooltoad.hessian import xtb_hessian_to_orca_hessian
 from tooltoad.utils import (
     STANDARD_PROPERTIES,
     WorkingDir,
-    check_executable,
+    require_executable,
     stream,
 )
 
 _logger = logging.getLogger(__name__)
 
-find_and_load_dotenv()
+XTB_CMD = None
 
-XTB_CMD = os.getenv("XTB_EXE", "xtb")
+
+def _resolve_xtb_cmd(xtb_cmd: str | None = None) -> str:
+    """Resolve the xTB executable when an xTB job is requested."""
+    find_and_load_dotenv()
+    return require_executable(
+        xtb_cmd,
+        env_var="XTB_EXE",
+        default="xtb",
+        executable_name="xTB",
+    )
 
 
 def xtb_calculate(
@@ -36,7 +45,7 @@ def xtb_calculate(
     detailed_input: None | dict = None,
     detailed_input_str: None | str = None,
     calc_dir: None | str = None,
-    xtb_cmd: str = XTB_CMD,
+    xtb_cmd: str | None = None,
     force: bool = False,
     data2file: None | dict = None,
 ) -> dict:
@@ -57,7 +66,7 @@ def xtb_calculate(
     Returns:
         dict: {'atoms': ..., 'coords': ..., ...}
     """
-    check_executable(xtb_cmd)
+    xtb_cmd = _resolve_xtb_cmd(xtb_cmd)
     set_threads(n_cores)
 
     # create TMP directory

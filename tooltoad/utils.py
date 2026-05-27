@@ -51,6 +51,63 @@ def check_executable(executable: str):
         warnings.warn(f"Executable {executable} not found in PATH")
 
 
+def require_executable(
+    executable: str | None,
+    *,
+    env_var: str | None = None,
+    default: str | None = None,
+    executable_name: str | None = None,
+) -> str:
+    """Resolve and require an executable at runtime.
+
+    Parameters
+    ----------
+    executable : str or None
+        Explicit executable command or path supplied by the caller.
+    env_var : str or None, optional
+        Environment variable to use when ``executable`` is not supplied.
+    default : str or None, optional
+        Fallback executable command when neither ``executable`` nor ``env_var``
+        resolve to a value.
+    executable_name : str or None, optional
+        Human-readable executable name used in error messages.
+
+    Returns
+    -------
+    str
+        The resolved executable command or path.
+
+    Raises
+    ------
+    RuntimeError
+        If no executable is configured or if the configured executable cannot
+        be found.
+    """
+    cmd = executable
+    if cmd is None and env_var:
+        cmd = os.getenv(env_var)
+    if cmd is None:
+        cmd = default
+
+    label = executable_name or env_var or "Executable"
+    if not cmd:
+        env_hint = f" Set {env_var} or pass an executable explicitly." if env_var else ""
+        raise RuntimeError(f"{label} executable is not configured.{env_hint}")
+
+    if shutil.which(cmd) is None:
+        if env_var and executable is None:
+            raise RuntimeError(
+                f"{label} executable from {env_var} was not found: {cmd!r}. "
+                f"Set {env_var} to a valid executable path or command."
+            )
+        raise RuntimeError(
+            f"{label} executable was not found: {cmd!r}. "
+            "Pass a valid executable path or ensure it is available on PATH."
+        )
+
+    return cmd
+
+
 class WorkingDir:
     def __init__(self, root: str = ".", name: str = None) -> None:
         self.root = Path(root)

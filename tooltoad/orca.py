@@ -13,35 +13,66 @@ import subprocess
 import numpy as np
 
 from tooltoad.chemutils import hartree2kcalmol, read_multi_xyz, xyz2ac
-from tooltoad.utils import WorkingDir, check_executable, stream
+from tooltoad.utils import WorkingDir, require_executable, stream
 from tooltoad.config import find_and_load_dotenv
 
 _logger = logging.getLogger(__name__)
 
-find_and_load_dotenv()
+ORCA_CMD = None
+OPEN_MPI_DIR = None
+XTB_EXE = None
+XTBPATH = ""
+SET_ENV = None
 
-ORCA_CMD = os.getenv("ORCA_EXE")
-OPEN_MPI_DIR = os.getenv("OPEN_MPI_DIR")
-XTB_EXE = os.getenv("XTB_EXE", "xtb")
-XTBPATH = os.getenv("XTBPATH", "")
 
-assert (
-    ORCA_CMD
-), "ORCA_EXE not found in environment variables (checked .env and system env). Please set it."
+def _resolve_open_mpi_dir(open_mpi_dir: str | None = None) -> str:
+    """Resolve the OpenMPI directory required by ORCA."""
+    resolved = open_mpi_dir or os.getenv("OPEN_MPI_DIR")
+    if not resolved:
+        raise RuntimeError(
+            "OPEN_MPI_DIR is not set. Set OPEN_MPI_DIR or pass set_env to "
+            "orca_calculate when using a custom ORCA runtime environment."
+        )
+    return resolved.rstrip("/")
 
-if OPEN_MPI_DIR:
-    OPEN_MPI_DIR = OPEN_MPI_DIR.rstrip("/")
-else:
-     assert (
-        OPEN_MPI_DIR
-    ), "OPEN_MPI_DIR not found in environment variables (checked .env and system env). Please set it."
 
-ORCA_DIR = Path(ORCA_CMD).parent
+def _build_orca_set_env(orca_cmd: str, open_mpi_dir: str) -> str:
+    """Build the shell environment prefix used for ORCA calculations."""
+    orca_path = shutil.which(orca_cmd) or orca_cmd
+    orca_dir = Path(orca_path).parent
+    xtb_exe = os.getenv("XTB_EXE", "xtb")
+    xtbpath = os.getenv("XTBPATH", "")
+    if not xtbpath:
+        _logger.warning(
+            "XTBPATH not found in environment variables (checked .env and "
+            "system env). xTB calculations via ORCA might fail if parameters "
+            "aren't found elsewhere."
+        )
+    return (
+        f'env - XTBEXE={xtb_exe} XTBPATH={xtbpath} '
+        f'PATH="{orca_dir}:{open_mpi_dir}/bin:$PATH" '
+        f'LD_LIBRARY_PATH="{open_mpi_dir}/lib:$LD_LIBRARY_PATH" '
+        f'DYLD_LIBRARY_PATH="{open_mpi_dir}/lib:$DYLD_LIBRARY_PATH"'
+    )
 
-if not XTBPATH:
-    _logger.warning("XTBPATH not found in environment variables (checked .env and system env). xTB calculations via ORCA might fail if parameters aren't found elsewhere.")
 
-SET_ENV = f'env - XTBEXE={XTB_EXE} XTBPATH={XTBPATH} PATH="{ORCA_DIR}:{OPEN_MPI_DIR}/bin:$PATH" LD_LIBRARY_PATH="{OPEN_MPI_DIR}/lib:$LD_LIBRARY_PATH" DYLD_LIBRARY_PATH="{OPEN_MPI_DIR}/lib:$DYLD_LIBRARY_PATH"'
+def _resolve_orca_runtime(
+    orca_cmd: str | None = None,
+    set_env: str | None = None,
+) -> tuple[str, str]:
+    """Resolve ORCA executable settings when an ORCA job is requested."""
+    find_and_load_dotenv()
+    resolved_orca_cmd = require_executable(
+        orca_cmd,
+        env_var="ORCA_EXE",
+        executable_name="ORCA",
+    )
+    if set_env is not None:
+        return resolved_orca_cmd, set_env
+    return resolved_orca_cmd, _build_orca_set_env(
+        resolved_orca_cmd,
+        _resolve_open_mpi_dir(),
+    )
 
 def orca_calculate(
     atoms: List[str],
@@ -54,8 +85,8 @@ def orca_calculate(
     n_cores: int = 1,
     memory: int = 8,
     calc_dir: str = None,
-    orca_cmd: str = ORCA_CMD,
-    set_env: str = SET_ENV,
+    orca_cmd: str | None = None,
+    set_env: str | None = None,
     force: bool = False,
     log_file: str | None = None,
     read_files: list | None = None,
@@ -88,7 +119,7 @@ def orca_calculate(
         assert save_dir, "save_dir must be provided if save_files are given"
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
-    check_executable(orca_cmd)
+    orca_cmd, set_env = _resolve_orca_runtime(orca_cmd=orca_cmd, set_env=set_env)
     work_dir = WorkingDir(root=scr, name=calc_dir)
     orig_xtbpath = os.environ.get("XTBPATH")
     os.environ["XTBPATH"] = str(work_dir)
@@ -722,8 +753,8 @@ def mock_orca_calculate(
     n_cores: int = 1,
     memory: int = 8,
     calc_dir: str = None,
-    orca_cmd: str = ORCA_CMD,
-    set_env: str = SET_ENV,
+    orca_cmd: str | None = None,
+    set_env: str | None = None,
     force: bool = False,
     log_file: str | None = None,
     read_files: list | None = None,
