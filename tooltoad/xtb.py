@@ -466,6 +466,32 @@ def read_xtb_results(lines: list[str]) -> dict:
                 return key, value
         return None
 
+    def parse_labeled_float_row(
+        line: str, *, expected: int, allowed_labels: tuple[str, ...]
+    ) -> list[float] | None:
+        """Parse an xTB labeled numeric row such as ``full: 1.0 2.0``."""
+        tokens = line.split()
+        if not tokens:
+            return None
+
+        label = tokens[0].rstrip(":").lower()
+        value_tokens = tokens[1:]
+        if len(tokens) >= 2 and tokens[0].lower() == "q":
+            label = f"q {tokens[1].rstrip(':').lower()}"
+            value_tokens = tokens[2:]
+
+        if label not in allowed_labels:
+            return None
+
+        try:
+            values = [float(x) for x in value_tokens]
+        except ValueError:
+            return None
+
+        if len(values) != expected:
+            return None
+        return values
+
     def parse_time(line):
         pattern = (
             r"\* wall-time:\s+(\d+)\s+d,\s+(\d+)\s+h,\s+(\d+)\s+min,\s+([\d\.]+)\s+sec"
@@ -492,6 +518,10 @@ def read_xtb_results(lines: list[str]) -> dict:
     ) = (np.nan, np.nan, np.nan, np.nan, np.nan, None)
     gfn_offset = 0
     properties = {}
+    dipole_vec = None
+    dipole_norm = None
+    quadrupole_mat = None
+    polarizability = None
     for i, line in enumerate(lines):
         line = line.strip()
         if "xtb version" in line:
@@ -529,24 +559,37 @@ def read_xtb_results(lines: list[str]) -> dict:
             polarizability = float(line.split()[-1])
 
         # read dipole moment
-        if i > (dipole_idx + 2 - gfn_offset):
-            dip_x, dip_y, dip_z, dip_norm = [
-                float(x) for x in line.split()[1 + gfn_offset :]
-            ]  # norm is in Debye
-            dipole_vec = np.array(
-                [dip_x, dip_y, dip_z]
-            )  # in a.u. (*2.5412 ot convert to Debye)
-            dipole_idx = np.nan
+        if not np.isnan(dipole_idx) and i > dipole_idx:
+            if i > (dipole_idx + 10):
+                dipole_idx = np.nan
+            else:
+                allowed_labels = ("q only", "full") if gfn_offset else ("full",)
+                dipole_values = parse_labeled_float_row(
+                    line, expected=4, allowed_labels=allowed_labels
+                )
+                if dipole_values is not None:
+                    dip_x, dip_y, dip_z, dipole_norm = dipole_values
+                    dipole_vec = np.array(
+                        [dip_x, dip_y, dip_z]
+                    )  # in a.u. (*2.5412 to convert to Debye)
+                    dipole_idx = np.nan
 
         # read quadrupole moment
-        if i > (quadrupole_idx + 3):
-            quad_vec = np.array([float(x) for x in line.split()[1:]])  # in a.u.
-            quad_vec[2], quad_vec[3] = quad_vec[3], quad_vec[2]
-            quadrupole_mat = np.zeros((3, 3))
-            indices = np.triu_indices(3)
-            quadrupole_mat[indices] = quad_vec
-            quadrupole_mat[indices[::-1]] = quad_vec
-            quadrupole_idx = np.nan
+        if not np.isnan(quadrupole_idx) and i > quadrupole_idx:
+            if i > (quadrupole_idx + 12):
+                quadrupole_idx = np.nan
+            else:
+                quadrupole_values = parse_labeled_float_row(
+                    line, expected=6, allowed_labels=("full",)
+                )
+                if quadrupole_values is not None:
+                    quad_vec = np.array(quadrupole_values)  # in a.u.
+                    quad_vec[2], quad_vec[3] = quad_vec[3], quad_vec[2]
+                    quadrupole_mat = np.zeros((3, 3))
+                    indices = np.triu_indices(3)
+                    quadrupole_mat[indices] = quad_vec
+                    quadrupole_mat[indices[::-1]] = quad_vec
+                    quadrupole_idx = np.nan
 
         # read runtimes
         if i == (runtime_idx + 1):
@@ -559,12 +602,12 @@ def read_xtb_results(lines: list[str]) -> dict:
         "timings": wall_time,
     }
 
-    if not np.isnan(polarizability_idx):
+    if polarizability is not None:
         results["polarizability"] = polarizability
-    if not np.isnan(dipole_idx):
+    if dipole_vec is not None:
         results["dipole_vec"] = dipole_vec
         results["dipole_norm"] = dipole_norm
-    if not np.isnan(quadrupole_idx):
+    if quadrupole_mat is not None:
         results["quadrupole_mat"] = quadrupole_mat
 
     results.update(properties)

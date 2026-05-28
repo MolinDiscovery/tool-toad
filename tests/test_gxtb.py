@@ -75,6 +75,61 @@ class GxtbTests(unittest.TestCase):
         ]
         self.assertEqual(read_gradients(grad_lines).tolist(), [[1.0, 2.0, 3.0]])
 
+    def test_xtb_parser_skips_text_inside_dipole_and_quadrupole_sections(self):
+        lines = [
+            " * xtb version 6.7.1\n",
+            " program call               : xtb mol.xyz --gfn 2\n",
+            " SUMMARY\n",
+            " ....................\n",
+            " total energy              -1.234500 Eh\n",
+            " ::::::::::::::::::::\n",
+            " molecular dipole:\n",
+            "                  x           y           z       tot (Debye)\n",
+            " Note: The following floating-point exceptions are signalling\n",
+            " q only:        0.000       0.000       0.551\n",
+            "   full:        0.100       0.200       0.300       0.400\n",
+            " molecular quadrupole (traceless):\n",
+            "                 xx          xy          yy          xz          yz          zz\n",
+            " q only:        0.926       0.000      -0.857       0.000       0.000      -0.069\n",
+            " Note: The following floating-point exceptions are signalling\n",
+            "  q+dip:        1.176      -0.000      -1.072       0.000      -0.000      -0.104\n",
+            "   full:        1.000       2.000       3.000       4.000       5.000       6.000\n",
+            " total:\n",
+            " * wall-time:     0 d,  0 h,  0 min,  1.0 sec\n",
+        ]
+
+        results = read_xtb_results(lines)
+
+        self.assertEqual(results["electronic_energy"], -1.2345)
+        self.assertEqual(results["dipole_vec"].tolist(), [0.1, 0.2, 0.3])
+        self.assertEqual(results["dipole_norm"], 0.4)
+        self.assertEqual(
+            results["quadrupole_mat"].tolist(),
+            [[1.0, 2.0, 4.0], [2.0, 3.0, 5.0], [4.0, 5.0, 6.0]],
+        )
+
+    def test_gfnff_dipole_parser_skips_text_before_q_only_row(self):
+        lines = [
+            " * xtb version 6.7.1\n",
+            " program call               : xtb mol.xyz --gfnff --opt\n",
+            " SUMMARY\n",
+            " ....................\n",
+            " total energy              -0.327655 Eh\n",
+            " ::::::::::::::::::::\n",
+            " molecular dipole:\n",
+            "                  x           y           z       tot (Debye)\n",
+            " Note: The following floating-point exceptions are signalling\n",
+            " q only:       -0.000      -0.000       0.677       1.720\n",
+            " total:\n",
+            " * wall-time:     0 d,  0 h,  0 min,  1.0 sec\n",
+        ]
+
+        results = read_xtb_results(lines)
+
+        self.assertEqual(results["electronic_energy"], -0.327655)
+        self.assertEqual(results["dipole_vec"].tolist(), [-0.0, -0.0, 0.677])
+        self.assertEqual(results["dipole_norm"], 1.72)
+
     def test_mock_gxtb_calculate_matches_basic_result_shape(self):
         result = mock_gxtb_calculate(
             atoms=["H"],
