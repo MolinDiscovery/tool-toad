@@ -447,6 +447,25 @@ def read_cavity_radius(lines: list[str]) -> float:
 def read_xtb_results(lines: list[str]) -> dict:
     """Read basic results from xTB log."""
 
+    def parse_summary_property(line: str) -> tuple[str, float] | None:
+        """Parse one xTB summary property line if it has a numeric value."""
+        tokens = line.strip(":").strip().strip("->").split()
+        candidates = []
+        if len(tokens) >= 2:
+            candidates.append((tokens[-2], tokens[:-2]))
+        if tokens:
+            candidates.append((tokens[-1], tokens[:-1]))
+
+        for raw_value, key_tokens in candidates:
+            try:
+                value = float(raw_value)
+            except ValueError:
+                continue
+            key = " ".join(key_tokens)
+            if key:
+                return key, value
+        return None
+
     def parse_time(line):
         pattern = (
             r"\* wall-time:\s+(\d+)\s+d,\s+(\d+)\s+h,\s+(\d+)\s+min,\s+([\d\.]+)\s+sec"
@@ -500,8 +519,10 @@ def read_xtb_results(lines: list[str]) -> dict:
             elif 20 * "." in line:
                 continue
             else:
-                tmp = line.strip(":").strip().strip("->").split()[:-1]
-                properties[" ".join(tmp[:-1])] = float(tmp[-1])
+                parsed_property = parse_summary_property(line)
+                if parsed_property is not None:
+                    key, value = parsed_property
+                    properties[key] = value
 
         # read polarizability
         if i == polarizability_idx:

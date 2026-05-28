@@ -57,6 +57,7 @@ class GxtbTests(unittest.TestCase):
             " SUMMARY\n",
             " ....................\n",
             " total energy              -1.234500 Eh\n",
+            " a text diagnostic that ends with of\n",
             " ::::::::::::::::::::\n",
             " normal termination of xtb\n",
             " * wall-time:     0 d,  0 h,  0 min,  1.0 sec\n",

@@ -6,10 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tooltoad.config import find_dotenv_path
+from tooltoad import config
+from tooltoad.config import find_and_load_dotenv, find_dotenv_path
 
 
 class ConfigTests(unittest.TestCase):
+    def setUp(self):
+        config._DOTENV_LOAD_CACHE.clear()
+
     def test_find_dotenv_path_prefers_configured_file(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -98,6 +102,28 @@ class ConfigTests(unittest.TestCase):
                 check=True,
             )
             self.assertEqual(result.stdout.strip(), "/example/home/openmpi")
+
+    def test_missing_dotenv_is_quiet_and_cached(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            home = tmp / "home"
+            home.mkdir()
+            env = {
+                "HOME": str(home),
+                "PATH": os.environ.get("PATH", ""),
+            }
+
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("pathlib.Path.cwd", return_value=tmp),
+                patch.object(config._logger, "warning") as warning,
+                patch.object(config, "find_dotenv_path", wraps=find_dotenv_path) as finder,
+            ):
+                self.assertIsNone(find_and_load_dotenv())
+                self.assertIsNone(find_and_load_dotenv())
+
+        warning.assert_not_called()
+        self.assertEqual(finder.call_count, 1)
 
 
 if __name__ == "__main__":
