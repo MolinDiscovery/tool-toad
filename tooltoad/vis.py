@@ -1193,9 +1193,10 @@ def MolTo3DGrid(
         - Ctrl-click two atoms to measure a distance
         - Shift-click three atoms to measure an angle
 
-    The viewer can also show per-cell legends, pre-draw atom labels, highlight
-    selected atoms, remove selected bonds before rendering, display formal
-    charges, link viewer motion across cells, and export the result to HTML.
+    The viewer can also show per-cell legends, pre-draw atom labels, mark
+    selected atoms with translucent cyan halo overlays, remove selected bonds
+    before rendering, display formal charges, link viewer motion across cells,
+    and export the result to HTML.
     When exported, the HTML is patched with JavaScript helpers for saving and
     reapplying views.
 
@@ -1242,8 +1243,9 @@ def MolTo3DGrid(
             Defaults to ``None``.
 
         highlightAtoms (list[int] | list[list[int]] | None, optional):
-            Atom indices to highlight in red. Provide one list per molecule, or a
-            single list for a single molecule. Defaults to ``None``.
+            Atom indices to mark with translucent cyan halo overlays. Provide
+            one list per molecule, or a single list for a single molecule.
+            Element colors are preserved. Defaults to ``None``.
 
         bonds_to_remove (list[tuple[int, int]] | None, optional):
             Bonds to remove before display, given as atom-index pairs. Applied to
@@ -1704,12 +1706,18 @@ applyViews(fixedViews);
         # Highlight atoms if requested
         if normalized_highlights is not None:
             atoms_sel = normalized_highlights[m_idx]
-            viewer.setStyle(
-                {'serial': atoms_sel},
-                {'stick': {'radius': 0.2, 'color': 'red'},
-                 'sphere': {'radius': 0.4, 'color': 'red'}},
-                viewer=(row, col)
-            )
+            conf = mol.GetConformer(conf_id)
+            for atom_idx in atoms_sel:
+                pos = conf.GetAtomPosition(atom_idx)
+                viewer.addSphere(
+                    {
+                        'center': {'x': pos.x, 'y': pos.y, 'z': pos.z},
+                        'radius': 0.62,
+                        'color': 'cyan',
+                        'alpha': 0.45,
+                    },
+                    viewer=(row, col),
+                )
 
     # Export HTML if requested
     if export_HTML != 'none':
