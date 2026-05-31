@@ -1756,7 +1756,7 @@ from tooltoad.scene3d import (  # noqa: E402
 
 
 def show_scene(scene: GridScene):
-    """Render a pre-built 3D grid scene.
+    """Return a rendered pre-built 3D grid scene viewer.
 
     Parameters
     ----------
@@ -1766,10 +1766,11 @@ def show_scene(scene: GridScene):
     Returns
     -------
     py3Dmol.view
-        Rendered viewer.
+        Rendered viewer. In notebooks, returning this object displays the
+        scene once without an additional explicit ``show()`` call.
     """
 
-    return Py3DmolGridRenderer(scene).show()
+    return Py3DmolGridRenderer(scene).render()
 
 
 def _normalize_scene_highlights(highlight_atoms, n_mols: int):

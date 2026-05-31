@@ -11,6 +11,7 @@ from tooltoad.scene3d import (
     SceneCell,
     VibrationAnimation,
 )
+from tooltoad.vis import show_scene
 
 
 class FakeViewer:
@@ -69,7 +70,31 @@ class Scene3DTests(unittest.TestCase):
         self.assertIn("addCylinder", call_names)
         self.assertIn("setClickable", call_names)
 
+    def test_show_scene_returns_viewer_without_explicit_show(self):
+        scene = GridScene(
+            cells=[
+                SceneCell(
+                    title="test",
+                    models=[
+                        MoleculeModel(
+                            atoms=["H"],
+                            coords=[[0.0, 0.0, 0.0]],
+                        )
+                    ],
+                )
+            ]
+        )
+
+        with (
+            patch("tooltoad.vis.Py3DmolGridRenderer.render", return_value="viewer") as render,
+            patch("tooltoad.vis.Py3DmolGridRenderer.show") as show,
+        ):
+            viewer = show_scene(scene)
+
+        render.assert_called_once()
+        show.assert_not_called()
+        self.assertEqual(viewer, "viewer")
+
 
 if __name__ == "__main__":
     unittest.main()
-
