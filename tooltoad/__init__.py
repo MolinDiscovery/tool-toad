@@ -13,6 +13,7 @@ from typing import Any
 
 _MODULES: dict[str, str] = {
     "chemutils": "tooltoad.chemutils",
+    "scene3d": "tooltoad.scene3d",
     "thermochemistry": "tooltoad.thermochemistry",
     "vis": "tooltoad.vis",
 }
@@ -30,6 +31,7 @@ _PUBLIC_API: dict[str, tuple[str, str]] = {
 
 _FALLBACK_MODULES = (
     "tooltoad.chemutils",
+    "tooltoad.scene3d",
     "tooltoad.vis",
     "tooltoad.thermochemistry",
 )

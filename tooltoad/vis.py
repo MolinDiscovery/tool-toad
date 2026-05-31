@@ -1734,6 +1734,235 @@ applyViews(fixedViews);
     viewer.show()
 
 
+# ---------------------------------------------------------------------------
+# Scene-backed 3D grid API
+# ---------------------------------------------------------------------------
+#
+# These definitions intentionally appear at the end of the module so they keep
+# the historical public names while routing new calls through the scene model.
+
+import math  # noqa: E402
+
+from tooltoad.scene3d import (  # noqa: E402
+    AtomHighlight,
+    GridScene,
+    MoleculeModel,
+    Py3DmolGridRenderer,
+    SceneCell,
+    VibrationAnimation,
+    coerce_to_mol,
+    ensure_3d_mol,
+)
+
+
+def show_scene(scene: GridScene):
+    """Render a pre-built 3D grid scene.
+
+    Parameters
+    ----------
+    scene
+        Scene to render.
+
+    Returns
+    -------
+    py3Dmol.view
+        Rendered viewer.
+    """
+
+    return Py3DmolGridRenderer(scene).show()
+
+
+def _normalize_scene_highlights(highlight_atoms, n_mols: int):
+    if highlight_atoms is None:
+        return [None] * n_mols
+    if all(isinstance(x, int) for x in highlight_atoms):
+        if n_mols != 1:
+            raise ValueError(
+                "For multiple molecules, highlightAtoms must contain one "
+                "sequence per molecule."
+            )
+        return [list(highlight_atoms)]
+    try:
+        normalized = [list(seq) if seq is not None else None for seq in highlight_atoms]
+    except TypeError as exc:
+        raise ValueError(
+            "highlightAtoms must be a sequence of ints or a sequence of sequences."
+        ) from exc
+    if len(normalized) != n_mols:
+        raise ValueError("Length of highlightAtoms must match number of molecules.")
+    return normalized
+
+
+def MolTo3DGrid(
+    mols: Chem.Mol | str | os.PathLike | list[Chem.Mol | str | os.PathLike],
+    show_labels: bool = False,
+    show_confs: bool = True,
+    background_color: tuple[str, float] = ("blue", 0.1),
+    export_HTML: str = "none",
+    cell_size: tuple[int, int] = (400, 400),
+    columns: int = 3,
+    linked: bool = False,
+    kekulize: bool = True,
+    legends: list[str] | None = None,
+    highlightAtoms: list[int] | list[list[int]] | None = None,
+    bonds_to_remove: list[tuple[int, int]] | None = None,
+    show_charges: bool = True,
+    verbose: bool = False,
+):
+    """Display one or more molecules in an interactive scene-backed 3D grid."""
+
+    if not isinstance(mols, list):
+        mols = [mols]
+    mols = [ensure_3d_mol(coerce_to_mol(mol), verbose=verbose) for mol in mols]
+
+    if legends is None or not legends:
+        legends = [f"Mol {idx + 1}" for idx in range(len(mols))]
+    if len(legends) != len(mols):
+        raise ValueError("Length of legends must match the number of molecules.")
+
+    normalized_highlights = _normalize_scene_highlights(highlightAtoms, len(mols))
+
+    cells = []
+    mols_with_multiple_confs = any(mol.GetNumConformers() > 1 for mol in mols)
+    for mol_idx, mol in enumerate(mols):
+        conf_ids = list(range(mol.GetNumConformers())) if show_confs else [0]
+        for conf_id in conf_ids:
+            title = legends[mol_idx]
+            if len(conf_ids) > 1:
+                title += f" c{conf_id + 1}"
+
+            overlays = [
+                AtomHighlight(atom=atom_idx)
+                for atom_idx in (normalized_highlights[mol_idx] or [])
+            ]
+            cells.append(
+                SceneCell(
+                    title=title,
+                    models=[
+                        MoleculeModel(
+                            mol=mol,
+                            conf_id=conf_id,
+                            kekulize=kekulize,
+                            show_atom_labels=show_labels,
+                            show_charges=show_charges,
+                            bonds_to_remove=bonds_to_remove,
+                        )
+                    ],
+                    overlays=overlays,
+                )
+            )
+
+    if len(mols) == 1 and not mols_with_multiple_confs:
+        columns = 1
+    elif len(mols) == 2 and not mols_with_multiple_confs:
+        columns = 2
+
+    scene = GridScene(
+        cells=cells,
+        columns=columns,
+        cell_size=cell_size,
+        linked=linked,
+        background_color=background_color,
+    )
+    renderer = Py3DmolGridRenderer(scene)
+    renderer.show()
+
+    if export_HTML != "none":
+        try:
+            renderer.write_html(export_HTML)
+            print(f"HTML export successful: {export_HTML}")
+        except Exception as e:
+            print(f"Error exporting HTML to '{export_HTML}': {e}")
+
+
+def show_vibs(
+    results: dict,
+    vId: int = 0,
+    width: float = 600,
+    height: float = 400,
+    numFrames: int = 20,
+    amplitude: float = 1.0,
+    transparent: bool = True,
+    fps: float | None = None,
+    reps: int = 100,
+    background_color: str | None = None,
+    vIds: list[int] | int | None = None,
+    viewergrid: tuple[int, int] | None = None,
+    linked: bool = True,
+    export_HTML: str | None = None,
+):
+    """Show one or more normal-mode vibrations with the scene renderer."""
+
+    atoms = results["atoms"]
+    opt_coords = results["opt_coords"]
+    vibs = results["vibs"]
+
+    if vIds is None:
+        mode_indices = [vId]
+    elif isinstance(vIds, int):
+        mode_indices = [vIds]
+    else:
+        mode_indices = list(vIds)
+
+    if viewergrid is None:
+        cols = 1 if len(mode_indices) == 1 else math.ceil(math.sqrt(len(mode_indices)))
+        rows = math.ceil(len(mode_indices) / cols)
+    else:
+        rows, cols = viewergrid
+
+    cell_width = max(1, int(width / cols))
+    cell_height = max(1, int(height / rows))
+    color = background_color or "0xeeeeee"
+
+    cells = []
+    for mode_index in mode_indices:
+        vib = vibs[mode_index]
+        frequency = vib["frequency"]
+        print(f"Normal mode {mode_index} with frequency {frequency} cm^-1")
+        cells.append(
+            SceneCell(
+                title=f"{frequency:.1f} cm^-1",
+                models=[
+                    MoleculeModel(
+                        atoms=atoms,
+                        coords=opt_coords,
+                        style={"sphere": {"radius": 0.4}, "stick": {}},
+                    )
+                ],
+                animations=[
+                    VibrationAnimation(
+                        mode=vib["mode"],
+                        frequency=frequency,
+                        num_frames=numFrames,
+                        amplitude=amplitude,
+                        fps=fps,
+                        reps=reps,
+                    )
+                ],
+            )
+        )
+
+    scene = GridScene(
+        cells=cells,
+        columns=cols,
+        cell_size=(cell_width, cell_height),
+        linked=linked,
+        background_color=color,
+        transparent=transparent,
+    )
+    renderer = Py3DmolGridRenderer(scene)
+    viewer = renderer.render()
+
+    if export_HTML:
+        try:
+            renderer.write_html(export_HTML)
+            print(f"HTML export successful: {export_HTML}")
+        except Exception as e:
+            print(f"Error exporting HTML to '{export_HTML}': {e}")
+
+    return viewer
+
+
 def MolTo3DGrid_old(
     mols,
     show_labels=False,
