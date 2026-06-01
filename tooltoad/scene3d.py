@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+import numpy as np
 from rdkit import Chem, rdBase
 from rdkit.Chem import AllChem, rdDetermineBonds
 from rdkit.Chem.rdchem import RWMol
@@ -65,6 +66,11 @@ class MoleculeModel:
     show_atom_labels: bool = False
     show_charges: bool = True
     bonds_to_remove: Sequence[tuple[int, int]] | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize array-like bond inputs after dataclass creation."""
+        self.bonds = normalize_bond_pairs(self.bonds)
+        self.bonds_to_remove = normalize_bond_pairs(self.bonds_to_remove)
 
 
 @dataclass(slots=True)
@@ -231,6 +237,76 @@ def molecule_model_from_atoms(
     """Build a molecule model from atoms, coordinates, and optional bonds."""
 
     return MoleculeModel(atoms=atoms, coords=coords, bonds=bonds, **kwargs)
+
+
+def normalize_bond_pairs(value: Any) -> list[tuple[int, int]] | None:
+    """Normalize array-like atom-index pairs.
+
+    Parameters
+    ----------
+    value
+        ``None``, an empty value, or a list/tuple/NumPy array of two-index
+        bond pairs.
+
+    Returns
+    -------
+    list of tuple of int or None
+        Normalized zero-based atom-index pairs, or ``None`` for missing/empty
+        input.
+
+    Raises
+    ------
+    ValueError
+        If a non-empty entry cannot be interpreted as exactly two atom indices.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return None
+        raw = value.tolist()
+    else:
+        try:
+            if value != value:
+                return None
+        except (TypeError, ValueError):
+            pass
+        raw = value
+
+    if raw is None:
+        return None
+    if isinstance(raw, tuple) and len(raw) == 2 and not _is_pair_collection(raw):
+        raw = [raw]
+    elif isinstance(raw, list) and len(raw) == 2 and not _is_pair_collection(raw):
+        raw = [raw]
+
+    try:
+        pairs = list(raw)
+    except TypeError as exc:
+        raise ValueError(f"Bond pairs must be an iterable of two-index pairs; got {value!r}") from exc
+
+    if len(pairs) == 0:
+        return None
+
+    normalized: list[tuple[int, int]] = []
+    for pair in pairs:
+        if isinstance(pair, np.ndarray):
+            pair = pair.tolist()
+        try:
+            items = list(pair)
+        except TypeError as exc:
+            raise ValueError(f"Bond entry must contain two atom indices; got {pair!r}") from exc
+        if len(items) != 2:
+            raise ValueError(f"Bond entry must contain exactly two atom indices; got {pair!r}")
+        normalized.append((int(items[0]), int(items[1])))
+
+    return normalized
+
+
+def _is_pair_collection(value: Sequence[Any]) -> bool:
+    """Return whether a 2-item value appears to contain nested bond pairs."""
+    return any(isinstance(item, (list, tuple, np.ndarray)) for item in value)
 
 
 def molecule_model_from_mol(
@@ -447,7 +523,7 @@ class Py3DmolGridRenderer:
         if model.mol is not None:
             mol = Chem.Mol(model.mol)
             mol = ensure_3d_mol(mol)
-            if model.bonds_to_remove:
+            if model.bonds_to_remove is not None:
                 editable = RWMol(mol)
                 for atom1, atom2 in model.bonds_to_remove:
                     if editable.GetBondBetweenAtoms(int(atom1), int(atom2)):
@@ -463,7 +539,7 @@ class Py3DmolGridRenderer:
         if model.atoms is None or model.coords is None:
             raise ValueError("MoleculeModel requires mol, mol_block, or atoms+coords.")
 
-        if model.bonds:
+        if model.bonds is not None:
             mol = self._mol_from_atoms(
                 model.atoms,
                 model.coords,
