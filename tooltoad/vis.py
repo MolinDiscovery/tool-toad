@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from io import BytesIO
 from pathlib import Path
@@ -1164,7 +1166,9 @@ def align_axes(axes, align_values):
     axes[0].set_ylim(ylim1)
 
 
-def MolTo3DGrid(
+# Preserved reference implementation: latest direct py3Dmol molecule renderer
+# before the scene-backed public wrapper replaced it.
+def _MolTo3DGrid_pre_scene(
     mols: Chem.Mol | str | os.PathLike | list[Chem.Mol | str | os.PathLike],
     show_labels: bool = False,
     show_confs: bool = True,
@@ -1734,6 +1738,460 @@ applyViews(fixedViews);
     viewer.show()
 
 
+def _rxn_object(rxn):
+    """Return an RDKit reaction object from a reaction object or string."""
+    from rdkit.Chem import rdChemReactions
+
+    if isinstance(rxn, (str, os.PathLike)):
+        rxn_obj = rdChemReactions.ReactionFromSmarts(str(rxn), useSmiles=True)
+        if rxn_obj is None:
+            raise ValueError(
+                "Could not parse reaction string. Make sure it is a valid "
+                "reaction SMILES/SMARTS."
+            )
+        return rxn_obj
+
+    if hasattr(rxn, "GetReactants") and hasattr(rxn, "GetProducts"):
+        return rxn
+
+    raise TypeError(
+        "rxn must be a ChemicalReaction or a reaction SMILES/SMARTS string."
+    )
+
+
+def _rxn_ensure_3d(mol):
+    """Return a molecule with 3D coordinates or a 2D coordinate fallback."""
+    from rdkit import rdBase
+    from rdkit.Chem import AllChem, rdDepictor
+    from rdkit.Chem.rdchem import RWMol
+    from rdkit.Geometry import Point3D
+
+    mol = RWMol(mol).GetMol()
+    if mol.GetNumConformers() > 0:
+        return mol
+
+    with rdBase.BlockLogs():
+        try:
+            Chem.SanitizeMol(mol)
+        except Exception:
+            pass
+
+        try:
+            params = AllChem.ETKDGv3()
+            params.randomSeed = 0xF00D
+            AllChem.EmbedMolecule(mol, params)
+            if mol.GetNumConformers() > 0:
+                return mol
+        except Exception:
+            pass
+
+        try:
+            rdDepictor.Compute2DCoords(mol)
+            if mol.GetNumConformers() > 0:
+                conf = mol.GetConformer()
+                for idx in range(mol.GetNumAtoms()):
+                    pos = conf.GetAtomPosition(idx)
+                    conf.SetAtomPosition(idx, Point3D(pos.x, pos.y, 0.0))
+                return mol
+        except Exception:
+            pass
+
+    return mol
+
+
+def _rxn_offset_mol(mol, dx: float):
+    """Return a copy of a molecule translated along x by ``dx``."""
+    from rdkit.Chem.rdchem import RWMol
+    from rdkit.Geometry import Point3D
+
+    mol = RWMol(mol).GetMol()
+    if mol.GetNumConformers() == 0:
+        mol = _rxn_ensure_3d(mol)
+    conf = mol.GetConformer()
+    for idx in range(mol.GetNumAtoms()):
+        pos = conf.GetAtomPosition(idx)
+        conf.SetAtomPosition(idx, Point3D(pos.x + dx, pos.y, pos.z))
+    return mol
+
+
+def _rxn_prepare_side(mols, gap: float = 4.0):
+    """Return side molecules arranged along x and centered as a group."""
+    from rdkit.Geometry import Point3D
+
+    prepared = []
+    bounds = []
+    current_x = 0.0
+
+    for mol in mols:
+        mol = _rxn_ensure_3d(Chem.Mol(mol))
+        if mol.GetNumAtoms() == 0 or mol.GetNumConformers() == 0:
+            prepared.append(mol)
+            continue
+
+        conf = mol.GetConformer()
+        xs = [conf.GetAtomPosition(idx).x for idx in range(mol.GetNumAtoms())]
+        xmin, xmax = min(xs), max(xs)
+        dx = current_x - xmin
+        shifted = _rxn_offset_mol(mol, dx)
+        prepared.append(shifted)
+        bounds.append((xmin + dx, xmax + dx))
+        current_x = xmax + dx + gap
+
+    if not bounds:
+        return prepared
+
+    center = 0.5 * (min(xmin for xmin, _ in bounds) + max(xmax for _, xmax in bounds))
+    for mol in prepared:
+        if mol.GetNumConformers() == 0:
+            continue
+        conf = mol.GetConformer()
+        for idx in range(mol.GetNumAtoms()):
+            pos = conf.GetAtomPosition(idx)
+            conf.SetAtomPosition(idx, Point3D(pos.x - center, pos.y, pos.z))
+
+    return prepared
+
+
+def _rxn_add_hs_safe(mol):
+    """Return a copy with explicit hydrogens when RDKit can add them."""
+    mol = Chem.Mol(mol)
+    try:
+        Chem.SanitizeMol(mol)
+    except Exception:
+        pass
+    try:
+        return Chem.AddHs(mol)
+    except Exception:
+        return mol
+
+
+def _rxn_stoichiometry(reactants, products, *, verbose: bool):
+    """Return atom and charge balance information for reaction sides."""
+    from collections import Counter
+
+    def _side_counts(mols):
+        elements = Counter()
+        total_charge = 0
+        for mol in mols:
+            mol = Chem.Mol(mol)
+            try:
+                Chem.SanitizeMol(mol)
+            except Exception:
+                pass
+            try:
+                mol_h = Chem.AddHs(mol)
+            except Exception:
+                mol_h = mol
+            for atom in mol_h.GetAtoms():
+                elements[atom.GetSymbol()] += 1
+                total_charge += atom.GetFormalCharge()
+        return elements, total_charge
+
+    r_counts, r_charge = _side_counts(reactants)
+    p_counts, p_charge = _side_counts(products)
+    elements = sorted(set(r_counts) | set(p_counts))
+    element_diffs = {
+        element: (
+            r_counts.get(element, 0),
+            p_counts.get(element, 0),
+            p_counts.get(element, 0) - r_counts.get(element, 0),
+        )
+        for element in elements
+    }
+    atoms_balanced = all(start == end for start, end, _ in element_diffs.values())
+    charges_balanced = r_charge == p_charge
+
+    result = {
+        "atoms_balanced": atoms_balanced,
+        "charges_balanced": charges_balanced,
+        "reactant_counts": r_counts,
+        "product_counts": p_counts,
+        "element_diffs": element_diffs,
+        "reactant_charge": r_charge,
+        "product_charge": p_charge,
+    }
+
+    if verbose:
+        print("=== Stoichiometry check (RxnTo3DGrid) ===")
+        for element in elements:
+            start, end, delta = element_diffs[element]
+            print(
+                f"{element:>2}: reactants={start:3d}  products={end:3d}  "
+                f"Δ={delta:+d}"
+            )
+        print(f"\nTotal charge: reactants={r_charge:+d}, products={p_charge:+d}")
+        print(f"\nAtoms balanced:   {atoms_balanced}")
+        print(f"Charges balanced: {charges_balanced}\n")
+
+    return result
+
+
+def _rxn_balance_overlay(stoich_result):
+    """Return a balance-status screen label overlay for the arrow cell."""
+    atoms_ok = stoich_result["atoms_balanced"]
+    charge_ok = stoich_result["charges_balanced"]
+    if atoms_ok and charge_ok:
+        text = "atoms ✓, charge ✓"
+        color = "green"
+    elif atoms_ok and not charge_ok:
+        text = "atoms ✓, charge ✗"
+        color = "orange"
+    elif not atoms_ok and charge_ok:
+        text = "atoms ✗, charge ✓"
+        color = "orange"
+    else:
+        text = "atoms ✗, charge ✗"
+        color = "red"
+    return ScreenLabelOverlay(
+        text=text,
+        font_color=color,
+        border_color=color,
+        screen_offset={"x": 120, "y": -125},
+    )
+
+
+def _rxn_mapped_bonds(mols):
+    """Return mapped bond orders by sorted atom-map pair."""
+    bonds = {}
+    for mol in mols:
+        for bond in mol.GetBonds():
+            begin = bond.GetBeginAtom()
+            end = bond.GetEndAtom()
+            if begin.HasProp("molAtomMapNumber") and end.HasProp("molAtomMapNumber"):
+                key = tuple(
+                    sorted(
+                        (
+                            begin.GetIntProp("molAtomMapNumber"),
+                            end.GetIntProp("molAtomMapNumber"),
+                        )
+                    )
+                )
+                bonds[key] = bond.GetBondType()
+    return bonds
+
+
+def _rxn_charge_map(mols):
+    """Return formal charges by atom-map number."""
+    charges = {}
+    for mol in mols:
+        for atom in mol.GetAtoms():
+            if atom.HasProp("molAtomMapNumber"):
+                charges[atom.GetIntProp("molAtomMapNumber")] = atom.GetFormalCharge()
+    return charges
+
+
+def _rxn_scene_map_index(mols):
+    """Return atom-map number to scene-cell atom index and symbol mappings."""
+    mapping = {}
+    symbols = {}
+    offset = 0
+    for mol in mols:
+        for atom in mol.GetAtoms():
+            if atom.HasProp("molAtomMapNumber"):
+                map_num = atom.GetIntProp("molAtomMapNumber")
+                mapping[map_num] = offset + atom.GetIdx()
+                symbols[map_num] = atom.GetSymbol()
+        offset += mol.GetNumAtoms()
+    return mapping, symbols
+
+
+def _rxn_bond_overlays(pairs, map_index, *, color: str):
+    """Return distance overlays for mapped bond-change pairs."""
+    overlays = []
+    for map_a, map_b in pairs:
+        atom_a = map_index.get(map_a)
+        atom_b = map_index.get(map_b)
+        if atom_a is None or atom_b is None:
+            continue
+        overlays.append(
+            DistanceOverlay(
+                atom1=atom_a,
+                atom2=atom_b,
+                color=color,
+                radius=0.18,
+            )
+        )
+    return overlays
+
+
+def _rxn_charge_overlays(charge_delta, map_index, symbols, *, h_mode: str):
+    """Return atom highlights for mapped charge changes."""
+    overlays = []
+    for map_num, delta in charge_delta.items():
+        atom_idx = map_index.get(map_num)
+        if atom_idx is None:
+            continue
+        if h_mode == "none" and symbols.get(map_num) == "H":
+            continue
+        overlays.append(
+            AtomHighlight(
+                atom=atom_idx,
+                color="red" if delta > 0 else "blue",
+                radius=0.35,
+                alpha=0.7,
+            )
+        )
+    return overlays
+
+
+def reaction_scene_cells(
+    rxn,
+    *,
+    show_labels: bool = False,
+    kekulize: bool = True,
+    show_charges: bool = True,
+    legends: list[str] | None = None,
+    show_bond_changes: bool = False,
+    h_mode: str = "reactive",
+    show_charge_changes: bool = False,
+    check_reaction_stoichiometry: bool = False,
+) -> list[SceneCell]:
+    """Build scene cells for a 3D reaction display.
+
+    Parameters
+    ----------
+    rxn
+        RDKit ChemicalReaction or reaction SMILES/SMARTS string.
+    show_labels
+        Draw atom index or ``atomNote`` labels on molecule models.
+    kekulize
+        Whether to kekulize RDKit mol blocks before rendering.
+    show_charges
+        Draw non-zero formal-charge labels.
+    legends
+        Two labels for reactants and products. Defaults to ``Reactants`` and
+        ``Products``.
+    show_bond_changes
+        Highlight mapped broken bonds in red, formed bonds in green, and bond
+        order changes in orange.
+    h_mode
+        Hydrogen display mode: ``none``, ``reactive``, or ``all``.
+    show_charge_changes
+        Highlight mapped atoms whose formal charge changes.
+    check_reaction_stoichiometry
+        Print atom and charge balance details.
+
+    Returns
+    -------
+    list of SceneCell
+        Three cells: reactants, arrow/status, and products.
+    """
+    h_mode = h_mode.lower()
+    if h_mode not in ("none", "reactive", "all"):
+        raise ValueError("h_mode must be one of 'none', 'reactive', or 'all'.")
+
+    if legends is None:
+        legends = ["Reactants", "Products"]
+    if len(legends) != 2:
+        raise ValueError("legends must be a list of two strings.")
+
+    rxn_obj = _rxn_object(rxn)
+    reactant_mols = [Chem.Mol(mol) for mol in rxn_obj.GetReactants()]
+    product_mols = [Chem.Mol(mol) for mol in rxn_obj.GetProducts()]
+
+    stoich_result = _rxn_stoichiometry(
+        reactant_mols,
+        product_mols,
+        verbose=check_reaction_stoichiometry,
+    )
+
+    if h_mode == "all":
+        reactant_mols = [_rxn_add_hs_safe(mol) for mol in reactant_mols]
+        product_mols = [_rxn_add_hs_safe(mol) for mol in product_mols]
+
+    reactant_bonds = _rxn_mapped_bonds(reactant_mols)
+    product_bonds = _rxn_mapped_bonds(product_mols)
+    reactant_charges = _rxn_charge_map(reactant_mols)
+    product_charges = _rxn_charge_map(product_mols)
+    have_mapping = bool(
+        reactant_bonds or product_bonds or reactant_charges or product_charges
+    )
+    if (show_bond_changes or show_charge_changes) and not have_mapping:
+        print(
+            "RxnTo3DGrid: mapping not found; bond/charge change highlighting "
+            "limited."
+        )
+
+    reactant_keys = set(reactant_bonds)
+    product_keys = set(product_bonds)
+    broken_bonds = reactant_keys - product_keys
+    formed_bonds = product_keys - reactant_keys
+    changed_bonds = {
+        key
+        for key in reactant_keys & product_keys
+        if reactant_bonds[key] != product_bonds[key]
+    }
+    charge_delta = {
+        map_num: product_charges.get(map_num, 0) - reactant_charges.get(map_num, 0)
+        for map_num in set(reactant_charges) | set(product_charges)
+        if product_charges.get(map_num, 0) != reactant_charges.get(map_num, 0)
+    }
+
+    left_side = _rxn_prepare_side(reactant_mols)
+    right_side = _rxn_prepare_side(product_mols)
+    hide_elements = ("H",) if h_mode == "none" else ()
+
+    left_index, left_symbols = _rxn_scene_map_index(left_side)
+    right_index, right_symbols = _rxn_scene_map_index(right_side)
+    left_overlays = []
+    right_overlays = []
+    if show_bond_changes and have_mapping:
+        left_overlays.extend(
+            _rxn_bond_overlays(broken_bonds, left_index, color="red")
+        )
+        left_overlays.extend(
+            _rxn_bond_overlays(changed_bonds, left_index, color="orange")
+        )
+        right_overlays.extend(
+            _rxn_bond_overlays(formed_bonds, right_index, color="green")
+        )
+        right_overlays.extend(
+            _rxn_bond_overlays(changed_bonds, right_index, color="orange")
+        )
+    if show_charge_changes and charge_delta:
+        left_overlays.extend(
+            _rxn_charge_overlays(
+                charge_delta,
+                left_index,
+                left_symbols,
+                h_mode=h_mode,
+            )
+        )
+        right_overlays.extend(
+            _rxn_charge_overlays(
+                charge_delta,
+                right_index,
+                right_symbols,
+                h_mode=h_mode,
+            )
+        )
+
+    model_kwargs = {
+        "kekulize": kekulize,
+        "show_atom_labels": show_labels,
+        "show_charges": show_charges,
+        "hide_elements": hide_elements,
+    }
+
+    return [
+        SceneCell(
+            title=legends[0],
+            models=[MoleculeModel(mol=mol, **model_kwargs) for mol in left_side],
+            overlays=left_overlays,
+        ),
+        SceneCell(
+            overlays=[
+                ArrowOverlay(),
+                _rxn_balance_overlay(stoich_result),
+            ],
+        ),
+        SceneCell(
+            title=legends[1],
+            models=[MoleculeModel(mol=mol, **model_kwargs) for mol in right_side],
+            overlays=right_overlays,
+        ),
+    ]
+
 # ---------------------------------------------------------------------------
 # Scene-backed 3D grid API
 # ---------------------------------------------------------------------------
@@ -1745,10 +2203,13 @@ import math  # noqa: E402
 
 from tooltoad.scene3d import (  # noqa: E402
     AtomHighlight,
+    ArrowOverlay,
+    DistanceOverlay,
     GridScene,
     MoleculeModel,
     Py3DmolGridRenderer,
     SceneCell,
+    ScreenLabelOverlay,
     VibrationAnimation,
     coerce_to_mol,
     ensure_3d_mol,
@@ -1810,7 +2271,70 @@ def MolTo3DGrid(
     show_charges: bool = True,
     verbose: bool = False,
 ):
-    """Display one or more molecules in an interactive scene-backed 3D grid."""
+    """Display one or more molecules in an interactive 3D grid.
+
+    This is the public scene-backed molecule viewer. It accepts RDKit
+    molecules, SMILES strings, ``.xyz`` paths, or a list containing any mix of
+    these inputs. Molecules without conformers are embedded automatically. Each
+    rendered cell supports the shared scene interaction model: click an atom to
+    toggle its label, Ctrl-click two atoms to measure a distance, and
+    Shift-click three atoms to measure an angle.
+
+    Parameters
+    ----------
+    mols
+        A molecule, SMILES string, ``.xyz`` path, or a list of these.
+    show_labels
+        If ``True``, draw atom labels before rendering. Labels use ``atomNote``
+        when present, otherwise atom indices.
+    show_confs
+        If ``True``, show every conformer of each molecule. If ``False``, show
+        only conformer ``0``.
+    background_color
+        Viewer background as ``(color, opacity)``, for example
+        ``("blue", 0.1)`` or ``("white", 1.0)``.
+    export_HTML
+        Output path for HTML export. Use ``"none"`` to disable export.
+    cell_size
+        Width and height of each grid cell in pixels.
+    columns
+        Number of grid columns. For one or two single-conformer molecules,
+        FRUST/Tooltoad chooses a compact one- or two-column layout.
+    linked
+        If ``True``, link rotation and zoom across all cells.
+    kekulize
+        Whether to kekulize RDKit mol blocks before display.
+    legends
+        Legend text for each input molecule. If omitted, default labels are
+        used. Conformer numbers are appended automatically when needed.
+    highlightAtoms
+        Atom indices to mark with translucent cyan halo overlays. Provide one
+        list per molecule, or a single list for a single molecule.
+    bonds_to_remove
+        Bonds to remove before display, given as atom-index pairs. These are
+        removed only on temporary visualization copies.
+    show_charges
+        If ``True``, display non-zero formal charges in 3D.
+    verbose
+        If ``True``, allow RDKit embedding messages to surface.
+
+    Returns
+    -------
+    None
+        The viewer is displayed directly in notebook contexts. For composable
+        scenes, build a :class:`tooltoad.scene3d.GridScene` and call
+        :func:`show_scene` instead.
+
+    Examples
+    --------
+    Show one molecule from SMILES::
+
+        MolTo3DGrid("C1=CC=CO1")
+
+    Show two molecules with synchronized rotation::
+
+        MolTo3DGrid(["C1=CC=CO1", "CN1C=CC=C1"], linked=True)
+    """
 
     if not isinstance(mols, list):
         mols = [mols]
@@ -1964,7 +2488,8 @@ def show_vibs(
     return viewer
 
 
-def MolTo3DGrid_old(
+# Preserved reference implementation: older original molecule grid renderer.
+def _MolTo3DGrid_legacy(
     mols,
     show_labels=False,
     show_confs: bool = True,
@@ -2346,7 +2871,123 @@ def MolTo3DGrid_old(
     viewer.show()
 
 
+# Scene-backed compatibility wrapper. The legacy reaction renderer is kept
+# privately below for reference, while the public name uses the shared renderer.
 def RxnTo3DGrid(
+    rxn,
+    show_labels: bool = False,
+    background_color: tuple = ("blue", 0.1),
+    export_HTML: str = "none",
+    cell_size=(400, 400),
+    linked: bool = False,
+    kekulize: bool = True,
+    show_charges: bool = True,
+    legends=None,
+    show_bond_changes: bool = False,
+    h_mode: str = "reactive",
+    show_charge_changes: bool = False,
+    check_reaction_stoichiometry: bool = False,
+):
+    """Display a reaction in a scene-backed 3D grid.
+
+    The reaction is rendered as one :class:`tooltoad.scene3d.GridScene` with
+    three cells: reactants, an arrow/status cell, and products. This preserves
+    the historical ``RxnTo3DGrid`` notebook API while routing rendering through
+    the shared scene renderer used by ``MolTo3DGrid`` and vibration views.
+
+    Parameters
+    ----------
+    rxn
+        RDKit ``ChemicalReaction`` or a reaction SMILES/SMARTS string. Strings
+        are parsed with ``ReactionFromSmarts(..., useSmiles=True)``.
+    show_labels
+        If ``True``, draw atom labels before rendering. Labels use ``atomNote``
+        when present, otherwise atom indices.
+    background_color
+        Viewer background as ``(color, opacity)``.
+    export_HTML
+        Output path for HTML export. Use ``"none"`` to disable export.
+    cell_size
+        Width and height of each of the three reaction grid cells in pixels.
+    linked
+        If ``True``, link rotation and zoom across reactant, arrow, and product
+        cells.
+    kekulize
+        Whether to kekulize RDKit mol blocks before display.
+    show_charges
+        If ``True``, display non-zero formal charges in 3D.
+    legends
+        Two labels: ``[reactant_label, product_label]``. Defaults to
+        ``["Reactants", "Products"]``.
+    show_bond_changes
+        If ``True`` and atom mapping is present, highlight mapped broken bonds
+        in red, formed bonds in green, and changed bond orders in orange.
+    h_mode
+        Hydrogen display mode. ``"none"`` hides all hydrogens, ``"reactive"``
+        keeps only hydrogens explicitly present in the reaction, and ``"all"``
+        adds explicit hydrogens to all molecules.
+    show_charge_changes
+        If ``True`` and atom mapping is present, highlight atoms whose formal
+        charge changes between reactants and products.
+    check_reaction_stoichiometry
+        If ``True``, print atom and charge balance details. A compact balance
+        label is shown in the arrow cell either way.
+
+    Returns
+    -------
+    None
+        The viewer is displayed directly in notebook contexts.
+
+    Examples
+    --------
+    Show a mapped bond cleavage reaction::
+
+        RxnTo3DGrid(
+            "[CH3:1][OH:2]>>[CH3:1].[OH:2]",
+            show_bond_changes=True,
+        )
+
+    Reuse reaction cells in a larger custom scene::
+
+        cells = reaction_scene_cells(
+            "[CH3:1][OH:2]>>[CH3:1].[OH:2]",
+            show_bond_changes=True,
+        )
+        scene = GridScene(cells=[*cells], columns=3)
+        show_scene(scene)
+    """
+    cells = reaction_scene_cells(
+        rxn,
+        show_labels=show_labels,
+        kekulize=kekulize,
+        show_charges=show_charges,
+        legends=legends,
+        show_bond_changes=show_bond_changes,
+        h_mode=h_mode,
+        show_charge_changes=show_charge_changes,
+        check_reaction_stoichiometry=check_reaction_stoichiometry,
+    )
+    scene = GridScene(
+        cells=cells,
+        columns=3,
+        cell_size=cell_size,
+        linked=linked,
+        background_color=background_color,
+    )
+    renderer = Py3DmolGridRenderer(scene)
+    renderer.show()
+
+    if export_HTML != "none":
+        try:
+            renderer.write_html(export_HTML)
+            print(f"HTML export successful: {export_HTML}")
+        except Exception as e:
+            print(f"Error exporting HTML to '{export_HTML}': {e}")
+
+    return None
+
+
+def _RxnTo3DGrid_legacy(
     rxn,
     show_labels: bool = False,
     background_color: tuple = ('blue', 0.1),

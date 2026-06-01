@@ -53,6 +53,9 @@ class MoleculeModel:
         Draw non-zero formal charges for RDKit models.
     bonds_to_remove
         Optional display-only bonds removed before rendering RDKit models.
+    hide_elements
+        Optional atomic symbols hidden after rendering, for display-only
+        controls such as reaction hydrogen visibility.
     """
 
     atoms: Sequence[str] | None = None
@@ -66,6 +69,7 @@ class MoleculeModel:
     show_atom_labels: bool = False
     show_charges: bool = True
     bonds_to_remove: Sequence[tuple[int, int]] | None = None
+    hide_elements: Sequence[str] = ()
 
     def __post_init__(self) -> None:
         """Normalize array-like bond inputs after dataclass creation."""
@@ -128,7 +132,39 @@ class AngleOverlay:
     color: str = "orange"
 
 
-SceneOverlay = AtomLabel | AtomHighlight | DistanceOverlay | AngleOverlay
+@dataclass(slots=True)
+class ArrowOverlay:
+    """A free-position arrow overlay in one scene cell."""
+
+    start: tuple[float, float, float] = (-1.5, 0.0, 0.0)
+    end: tuple[float, float, float] = (1.5, 0.0, 0.0)
+    radius: float = 0.15
+    color: str = "black"
+
+
+@dataclass(slots=True)
+class ScreenLabelOverlay:
+    """A screen-position label overlay in one scene cell."""
+
+    text: str
+    font_color: str = "black"
+    background_color: str = "white"
+    border_color: str | None = "black"
+    border_width: int = 1
+    font_size: int = 12
+    screen_offset: dict[str, int] | None = None
+    position: tuple[float, float, float] | None = None
+    in_front: bool = True
+
+
+SceneOverlay = (
+    AtomLabel
+    | AtomHighlight
+    | DistanceOverlay
+    | AngleOverlay
+    | ArrowOverlay
+    | ScreenLabelOverlay
+)
 
 
 @dataclass(slots=True)
@@ -500,6 +536,8 @@ class Py3DmolGridRenderer:
             model.style or {"stick": {}, "sphere": {"radius": 0.3}},
             viewer=viewer_position,
         )
+        for element in model.hide_elements:
+            self.viewer.setStyle({"elem": str(element)}, {}, viewer=viewer_position)
 
         if model.show_atom_labels:
             self._add_atom_index_labels(model, positions, viewer_position, rdkit_mol)
@@ -755,6 +793,48 @@ class Py3DmolGridRenderer:
                 },
                 viewer=viewer_position,
             )
+            return
+
+        if isinstance(overlay, ArrowOverlay):
+            self.viewer.addArrow(
+                {
+                    "start": {
+                        "x": overlay.start[0],
+                        "y": overlay.start[1],
+                        "z": overlay.start[2],
+                    },
+                    "end": {
+                        "x": overlay.end[0],
+                        "y": overlay.end[1],
+                        "z": overlay.end[2],
+                    },
+                    "radius": overlay.radius,
+                    "color": overlay.color,
+                },
+                viewer=viewer_position,
+            )
+            return
+
+        if isinstance(overlay, ScreenLabelOverlay):
+            opts = {
+                "fontColor": overlay.font_color,
+                "backgroundColor": overlay.background_color,
+                "useScreen": True,
+                "inFront": overlay.in_front,
+                "fontSize": overlay.font_size,
+            }
+            if overlay.border_color is not None:
+                opts["borderColor"] = overlay.border_color
+                opts["borderWidth"] = overlay.border_width
+            if overlay.screen_offset is not None:
+                opts["screenOffset"] = overlay.screen_offset
+            if overlay.position is not None:
+                opts["position"] = {
+                    "x": overlay.position[0],
+                    "y": overlay.position[1],
+                    "z": overlay.position[2],
+                }
+            self.viewer.addLabel(overlay.text, opts, viewer=viewer_position)
 
     def _add_screen_label(
         self,
