@@ -4,6 +4,7 @@ from unittest.mock import patch
 import numpy as np
 
 from tooltoad.scene3d import (
+    AngleOverlay,
     AtomHighlight,
     AtomLabel,
     ArrowOverlay,
@@ -14,6 +15,7 @@ from tooltoad.scene3d import (
     SceneCell,
     ScreenLabelOverlay,
     VibrationAnimation,
+    _angle_guide_geometry,
     normalize_bond_pairs,
 )
 from tooltoad.vis import RxnTo3DGrid, reaction_scene_cells, show_scene
@@ -111,6 +113,97 @@ class Scene3DTests(unittest.TestCase):
         call_names = [name for name, _, _ in fake.calls]
         self.assertIn("addArrow", call_names)
         self.assertIn("addLabel", call_names)
+
+    def test_renderer_renders_angle_overlay_arms_arc_and_offset_label(self):
+        fake = FakeViewer()
+        scene = GridScene(
+            cells=[
+                SceneCell(
+                    models=[
+                        MoleculeModel(
+                            atoms=["C", "C", "C"],
+                            coords=[
+                                [1.0, 0.0, 0.0],
+                                [0.0, 0.0, 0.0],
+                                [0.0, 1.0, 0.0],
+                            ],
+                        )
+                    ],
+                    overlays=[
+                        AngleOverlay(
+                            atom1=0,
+                            atom2=1,
+                            atom3=2,
+                            label="90.0 deg",
+                        )
+                    ],
+                )
+            ],
+            columns=1,
+        )
+
+        with patch("py3Dmol.view", return_value=fake):
+            Py3DmolGridRenderer(scene).render()
+
+        cylinder_calls = [call for call in fake.calls if call[0] == "addCylinder"]
+        self.assertGreaterEqual(len(cylinder_calls), 14)
+        np.testing.assert_allclose(
+            list(cylinder_calls[0][1][0]["end"].values()),
+            [1.0, 0.0, 0.0],
+        )
+        np.testing.assert_allclose(
+            list(cylinder_calls[1][1][0]["end"].values()),
+            [0.0, 1.0, 0.0],
+        )
+
+        angle_label_call = next(
+            call
+            for call in fake.calls
+            if call[0] == "addLabel" and call[1][0] == "90.0 deg"
+        )
+        label_position = angle_label_call[1][1]["position"]
+        self.assertGreater(label_position["x"], 0.0)
+        self.assertGreater(label_position["y"], 0.0)
+        self.assertAlmostEqual(label_position["z"], 0.0)
+
+    def test_angle_guide_geometry_for_right_angle(self):
+        geometry = _angle_guide_geometry(
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        )
+
+        self.assertIsNotNone(geometry)
+        np.testing.assert_allclose(geometry.arm1_end, [1.0, 0.0, 0.0])
+        np.testing.assert_allclose(geometry.arm2_end, [0.0, 1.0, 0.0])
+        self.assertEqual(len(geometry.arc_segments), 12)
+        self.assertGreater(geometry.label_position[0], 0.0)
+        self.assertGreater(geometry.label_position[1], 0.0)
+
+    def test_angle_guide_geometry_for_obtuse_angle(self):
+        geometry = _angle_guide_geometry(
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [-0.5, np.sqrt(3.0) / 2.0, 0.0],
+        )
+
+        self.assertIsNotNone(geometry)
+        np.testing.assert_allclose(geometry.arm1_end, [1.0, 0.0, 0.0])
+        np.testing.assert_allclose(
+            geometry.arm2_end,
+            [-0.5, np.sqrt(3.0) / 2.0, 0.0],
+        )
+        self.assertEqual(len(geometry.arc_segments), 12)
+        self.assertGreater(geometry.label_position[1], 0.0)
+
+    def test_angle_guide_geometry_returns_none_for_zero_length_vector(self):
+        geometry = _angle_guide_geometry(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        )
+
+        self.assertIsNone(geometry)
 
     def test_renderer_accepts_numpy_array_bonds(self):
         fake = FakeViewer()
