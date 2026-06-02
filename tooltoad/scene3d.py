@@ -123,13 +123,118 @@ class DistanceOverlay:
 
 @dataclass(slots=True)
 class AngleOverlay:
-    """An angle label for three atoms."""
+    """An angle guide and optional label for three atoms."""
 
     atom1: int
     atom2: int
     atom3: int
     label: str | None = None
     color: str = "orange"
+
+
+@dataclass(frozen=True, slots=True)
+class _AngleGuideGeometry:
+    """Computed display geometry for an angle overlay."""
+
+    arm1_end: tuple[float, float, float]
+    arm2_end: tuple[float, float, float]
+    arc_segments: tuple[
+        tuple[tuple[float, float, float], tuple[float, float, float]],
+        ...,
+    ]
+    label_position: tuple[float, float, float]
+
+
+ANGLE_GUIDE_RADIUS_FRACTION = 0.45
+ANGLE_GUIDE_MAX_RADIUS = 1.0
+ANGLE_GUIDE_CYLINDER_RADIUS = 0.035
+ANGLE_GUIDE_ARC_SEGMENTS = 24
+ANGLE_GUIDE_LABEL_RADIUS_FACTOR = 1.25
+ANGLE_GUIDE_EPSILON = 1.0e-8
+
+
+def _angle_guide_geometry(
+    xyz1: Sequence[float],
+    center: Sequence[float],
+    xyz3: Sequence[float],
+) -> _AngleGuideGeometry | None:
+    """Compute full arms, dashed arc segments, and label position for an angle."""
+
+    p1 = np.array(xyz1, dtype=float)
+    p2 = np.array(center, dtype=float)
+    p3 = np.array(xyz3, dtype=float)
+    vec1 = p1 - p2
+    vec3 = p3 - p2
+    norm1 = float(np.linalg.norm(vec1))
+    norm3 = float(np.linalg.norm(vec3))
+    if norm1 < ANGLE_GUIDE_EPSILON or norm3 < ANGLE_GUIDE_EPSILON:
+        return None
+
+    unit1 = vec1 / norm1
+    unit3 = vec3 / norm3
+    dot = float(np.clip(np.dot(unit1, unit3), -1.0, 1.0))
+    angle = float(math.acos(dot))
+    arc_radius = min(
+        ANGLE_GUIDE_RADIUS_FRACTION * min(norm1, norm3),
+        ANGLE_GUIDE_MAX_RADIUS,
+    )
+
+    plane_y = unit3 - dot * unit1
+    plane_y_norm = float(np.linalg.norm(plane_y))
+    if plane_y_norm < ANGLE_GUIDE_EPSILON:
+        plane_y = _orthogonal_unit_vector(unit1)
+    else:
+        plane_y = plane_y / plane_y_norm
+
+    arm1_end = p1
+    arm2_end = p3
+    arc_points = [
+        p2 + arc_radius * (math.cos(theta) * unit1 + math.sin(theta) * plane_y)
+        for theta in np.linspace(0.0, angle, ANGLE_GUIDE_ARC_SEGMENTS + 1)
+    ]
+    arc_segments = tuple(
+        (_as_xyz_tuple(arc_points[idx]), _as_xyz_tuple(arc_points[idx + 1]))
+        for idx in range(ANGLE_GUIDE_ARC_SEGMENTS)
+        if idx % 2 == 0
+    )
+
+    label_direction = unit1 + unit3
+    label_direction_norm = float(np.linalg.norm(label_direction))
+    if label_direction_norm < ANGLE_GUIDE_EPSILON:
+        half_angle = angle * 0.5
+        label_direction = math.cos(half_angle) * unit1 + math.sin(half_angle) * plane_y
+    else:
+        label_direction = label_direction / label_direction_norm
+    label_position = p2 + arc_radius * ANGLE_GUIDE_LABEL_RADIUS_FACTOR * label_direction
+
+    return _AngleGuideGeometry(
+        arm1_end=_as_xyz_tuple(arm1_end),
+        arm2_end=_as_xyz_tuple(arm2_end),
+        arc_segments=arc_segments,
+        label_position=_as_xyz_tuple(label_position),
+    )
+
+
+def _orthogonal_unit_vector(vector: np.ndarray) -> np.ndarray:
+    """Return a stable unit vector perpendicular to ``vector``."""
+
+    axis = np.array([1.0, 0.0, 0.0])
+    if abs(float(np.dot(vector, axis))) > 0.9:
+        axis = np.array([0.0, 1.0, 0.0])
+    out = np.cross(vector, axis)
+    return out / np.linalg.norm(out)
+
+
+def _as_xyz_tuple(point: Sequence[float]) -> tuple[float, float, float]:
+    """Return a JSON-friendly xyz tuple."""
+
+    return (float(point[0]), float(point[1]), float(point[2]))
+
+
+def _xyz_dict(point: Sequence[float]) -> dict[str, float]:
+    """Return a py3Dmol xyz dictionary."""
+
+    return {"x": float(point[0]), "y": float(point[1]), "z": float(point[2])}
 
 
 @dataclass(slots=True)
@@ -781,12 +886,38 @@ class Py3DmolGridRenderer:
             return
 
         if isinstance(overlay, AngleOverlay):
+            xyz1 = positions[int(overlay.atom1)]
             center = positions[int(overlay.atom2)]
+            xyz3 = positions[int(overlay.atom3)]
             text = overlay.label or f"{overlay.atom1}-{overlay.atom2}-{overlay.atom3}"
+            geometry = _angle_guide_geometry(xyz1, center, xyz3)
+            label_position = center
+            if geometry is not None:
+                for end in (geometry.arm1_end, geometry.arm2_end):
+                    self.viewer.addCylinder(
+                        {
+                            "start": _xyz_dict(center),
+                            "end": _xyz_dict(end),
+                            "radius": ANGLE_GUIDE_CYLINDER_RADIUS,
+                            "color": overlay.color,
+                        },
+                        viewer=viewer_position,
+                    )
+                for start, end in geometry.arc_segments:
+                    self.viewer.addCylinder(
+                        {
+                            "start": _xyz_dict(start),
+                            "end": _xyz_dict(end),
+                            "radius": ANGLE_GUIDE_CYLINDER_RADIUS,
+                            "color": overlay.color,
+                        },
+                        viewer=viewer_position,
+                    )
+                label_position = geometry.label_position
             self.viewer.addLabel(
                 text,
                 {
-                    "position": {"x": center[0], "y": center[1], "z": center[2]},
+                    "position": _xyz_dict(label_position),
                     "backgroundColor": "white",
                     "fontColor": overlay.color,
                     "fontSize": 12,
