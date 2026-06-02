@@ -123,13 +123,18 @@ class DistanceOverlay:
 
 @dataclass(slots=True)
 class AngleOverlay:
-    """An angle label for three atoms."""
+    """An angle arc and optional label for three atoms."""
 
     atom1: int
     atom2: int
     atom3: int
     label: str | None = None
     color: str = "orange"
+    radius: float = 0.8
+    alpha: float = 0.85
+    arc_segments: int = 24
+    cylinder_radius: float = 0.045
+    show_arms: bool = True
 
 
 @dataclass(slots=True)
@@ -781,18 +786,7 @@ class Py3DmolGridRenderer:
             return
 
         if isinstance(overlay, AngleOverlay):
-            center = positions[int(overlay.atom2)]
-            text = overlay.label or f"{overlay.atom1}-{overlay.atom2}-{overlay.atom3}"
-            self.viewer.addLabel(
-                text,
-                {
-                    "position": {"x": center[0], "y": center[1], "z": center[2]},
-                    "backgroundColor": "white",
-                    "fontColor": overlay.color,
-                    "fontSize": 12,
-                },
-                viewer=viewer_position,
-            )
+            self._add_angle_overlay(overlay, positions, viewer_position)
             return
 
         if isinstance(overlay, ArrowOverlay):
@@ -835,6 +829,163 @@ class Py3DmolGridRenderer:
                     "z": overlay.position[2],
                 }
             self.viewer.addLabel(overlay.text, opts, viewer=viewer_position)
+
+    def _add_angle_overlay(
+        self,
+        overlay: AngleOverlay,
+        positions: dict[int, tuple[float, float, float]],
+        viewer_position: tuple[int, int],
+    ) -> None:
+        p1 = np.asarray(positions[int(overlay.atom1)], dtype=float)
+        p2 = np.asarray(positions[int(overlay.atom2)], dtype=float)
+        p3 = np.asarray(positions[int(overlay.atom3)], dtype=float)
+
+        v1_raw = p1 - p2
+        v2_raw = p3 - p2
+        n1 = float(np.linalg.norm(v1_raw))
+        n2 = float(np.linalg.norm(v2_raw))
+        eps = 1.0e-8
+        if n1 < eps or n2 < eps:
+            self._add_angle_label(
+                overlay,
+                p2,
+                overlay.label or f"{overlay.atom1}-{overlay.atom2}-{overlay.atom3}",
+                viewer_position,
+            )
+            return
+
+        v1 = v1_raw / n1
+        v2 = v2_raw / n2
+        dot = float(np.clip(np.dot(v1, v2), -1.0, 1.0))
+        theta = float(math.acos(dot))
+        theta_deg = math.degrees(theta)
+        radius = min(float(overlay.radius), 0.35 * min(n1, n2))
+        radius = max(radius, eps)
+
+        if overlay.show_arms:
+            self._add_angle_cylinder(p2, p2 + radius * v1, overlay, viewer_position)
+            self._add_angle_cylinder(p2, p2 + radius * v2, overlay, viewer_position)
+
+        sin_theta = math.sin(theta)
+        arc_points: list[np.ndarray] = []
+        if abs(sin_theta) >= 1.0e-4:
+            segments = max(1, int(overlay.arc_segments))
+            for idx in range(segments + 1):
+                t = theta * idx / segments
+                direction = (
+                    math.sin(theta - t) * v1 + math.sin(t) * v2
+                ) / sin_theta
+                norm = float(np.linalg.norm(direction))
+                if norm < eps:
+                    continue
+                arc_points.append(p2 + radius * direction / norm)
+
+            for start, end in zip(arc_points, arc_points[1:]):
+                self._add_angle_cylinder(start, end, overlay, viewer_position)
+        else:
+            arc_points = self._collinear_angle_arc_points(
+                p2,
+                radius,
+                v1,
+                theta,
+                overlay,
+            )
+            for start, end in zip(arc_points, arc_points[1:]):
+                self._add_angle_cylinder(start, end, overlay, viewer_position)
+
+        if arc_points:
+            label_position = arc_points[len(arc_points) // 2]
+        else:
+            label_position = p2 + radius * self._angle_label_direction(v1, v2)
+
+        text = overlay.label or f"{theta_deg:.1f}°"
+        self._add_angle_label(overlay, label_position, text, viewer_position)
+
+    def _add_angle_cylinder(
+        self,
+        start: np.ndarray,
+        end: np.ndarray,
+        overlay: AngleOverlay,
+        viewer_position: tuple[int, int],
+    ) -> None:
+        if float(np.linalg.norm(end - start)) < 1.0e-8:
+            return
+        self.viewer.addCylinder(
+            {
+                "start": _xyz_dict(start),
+                "end": _xyz_dict(end),
+                "radius": overlay.cylinder_radius,
+                "color": overlay.color,
+                "alpha": overlay.alpha,
+            },
+            viewer=viewer_position,
+        )
+
+    def _add_angle_label(
+        self,
+        overlay: AngleOverlay,
+        position: np.ndarray,
+        text: str,
+        viewer_position: tuple[int, int],
+    ) -> None:
+        self.viewer.addLabel(
+            text,
+            {
+                "position": _xyz_dict(position),
+                "backgroundColor": "white",
+                "fontColor": overlay.color,
+                "fontSize": 12,
+            },
+            viewer=viewer_position,
+        )
+
+    @staticmethod
+    def _angle_label_direction(v1: np.ndarray, v2: np.ndarray) -> np.ndarray:
+        direction = v1 + v2
+        norm = float(np.linalg.norm(direction))
+        if norm >= 1.0e-8:
+            return direction / norm
+
+        axis = np.array([1.0, 0.0, 0.0])
+        if abs(float(np.dot(v1, axis))) > 0.9:
+            axis = np.array([0.0, 1.0, 0.0])
+        direction = np.cross(v1, axis)
+        norm = float(np.linalg.norm(direction))
+        if norm < 1.0e-8:
+            return v1
+        return direction / norm
+
+    @staticmethod
+    def _collinear_angle_arc_points(
+        center: np.ndarray,
+        radius: float,
+        direction: np.ndarray,
+        theta: float,
+        overlay: AngleOverlay,
+    ) -> list[np.ndarray]:
+        arc_theta = theta
+        if arc_theta < math.radians(3.0):
+            arc_theta = math.radians(12.0)
+        segments = max(4, int(overlay.arc_segments))
+        perpendicular = Py3DmolGridRenderer._perpendicular_direction(direction)
+        return [
+            center
+            + radius
+            * (math.cos(arc_theta * idx / segments) * direction
+               + math.sin(arc_theta * idx / segments) * perpendicular)
+            for idx in range(segments + 1)
+        ]
+
+    @staticmethod
+    def _perpendicular_direction(direction: np.ndarray) -> np.ndarray:
+        axis = np.array([0.0, 0.0, 1.0])
+        if abs(float(np.dot(direction, axis))) > 0.9:
+            axis = np.array([0.0, 1.0, 0.0])
+        perpendicular = np.cross(direction, axis)
+        norm = float(np.linalg.norm(perpendicular))
+        if norm < 1.0e-8:
+            return np.array([1.0, 0.0, 0.0])
+        return perpendicular / norm
 
     def _add_screen_label(
         self,
@@ -894,6 +1045,14 @@ class Py3DmolGridRenderer:
 
         html = html.replace(marker, helper_js + "\n" + marker, 1)
         html_path.write_text(html, encoding="utf-8")
+
+
+def _xyz_dict(point: Sequence[float] | np.ndarray) -> dict[str, float]:
+    return {
+        "x": float(point[0]),
+        "y": float(point[1]),
+        "z": float(point[2]),
+    }
 
 
 def _grid_helper_js(grid_var: str) -> str:

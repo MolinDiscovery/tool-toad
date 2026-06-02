@@ -4,6 +4,7 @@ from unittest.mock import patch
 import numpy as np
 
 from tooltoad.scene3d import (
+    AngleOverlay,
     AtomHighlight,
     AtomLabel,
     ArrowOverlay,
@@ -110,6 +111,89 @@ class Scene3DTests(unittest.TestCase):
 
         call_names = [name for name, _, _ in fake.calls]
         self.assertIn("addArrow", call_names)
+        self.assertIn("addLabel", call_names)
+
+    def test_renderer_renders_angle_overlay_as_arc(self):
+        fake = FakeViewer()
+        scene = GridScene(
+            cells=[
+                SceneCell(
+                    models=[
+                        MoleculeModel(
+                            atoms=["C", "C", "C"],
+                            coords=[
+                                [1.0, 0.0, 0.0],
+                                [0.0, 0.0, 0.0],
+                                [0.0, 1.0, 0.0],
+                            ],
+                            bonds=[(0, 1), (1, 2)],
+                        )
+                    ],
+                    overlays=[AngleOverlay(atom1=0, atom2=1, atom3=2)],
+                )
+            ],
+            columns=1,
+        )
+
+        with patch("py3Dmol.view", return_value=fake):
+            Py3DmolGridRenderer(scene).render()
+
+        call_names = [name for name, _, _ in fake.calls]
+        self.assertGreater(call_names.count("addCylinder"), 2)
+        self.assertIn("addLabel", call_names)
+
+    def test_renderer_handles_degenerate_angle_overlay(self):
+        fake = FakeViewer()
+        scene = GridScene(
+            cells=[
+                SceneCell(
+                    models=[
+                        MoleculeModel(
+                            atoms=["C", "C", "C"],
+                            coords=[
+                                [0.0, 0.0, 0.0],
+                                [0.0, 0.0, 0.0],
+                                [0.0, 1.0, 0.0],
+                            ],
+                        )
+                    ],
+                    overlays=[AngleOverlay(atom1=0, atom2=1, atom3=2)],
+                )
+            ],
+            columns=1,
+        )
+
+        with patch("py3Dmol.view", return_value=fake):
+            Py3DmolGridRenderer(scene).render()
+
+        self.assertIn("addLabel", [name for name, _, _ in fake.calls])
+
+    def test_renderer_handles_collinear_angle_overlay(self):
+        fake = FakeViewer()
+        scene = GridScene(
+            cells=[
+                SceneCell(
+                    models=[
+                        MoleculeModel(
+                            atoms=["C", "C", "C"],
+                            coords=[
+                                [-1.0, 0.0, 0.0],
+                                [0.0, 0.0, 0.0],
+                                [1.0, 0.0, 0.0],
+                            ],
+                        )
+                    ],
+                    overlays=[AngleOverlay(atom1=0, atom2=1, atom3=2)],
+                )
+            ],
+            columns=1,
+        )
+
+        with patch("py3Dmol.view", return_value=fake):
+            Py3DmolGridRenderer(scene).render()
+
+        call_names = [name for name, _, _ in fake.calls]
+        self.assertGreater(call_names.count("addCylinder"), 2)
         self.assertIn("addLabel", call_names)
 
     def test_renderer_accepts_numpy_array_bonds(self):
