@@ -2,7 +2,10 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from rdkit import Chem
+from rdkit.Chem import AllChem
 
+import tooltoad.vis as tooltoad_vis
 from tooltoad.scene3d import (
     AngleOverlay,
     AtomHighlight,
@@ -50,6 +53,22 @@ class Scene3DTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly two atom indices"):
             normalize_bond_pairs([[0, 1, 2]])
 
+    def test_click_handler_draws_interactive_measurement_guides(self):
+        handler = Py3DmolGridRenderer._CLICK_HANDLER
+
+        self.assertIn("viewer._distLines", handler)
+        self.assertIn("viewer._angleShapes", handler)
+        self.assertIn("viewer.addCylinder", handler)
+        self.assertIn("viewer.removeShape", handler)
+        self.assertIn("DISTANCE_COLOR = 'green'", handler)
+        self.assertIn("DISTANCE_RADIUS = 0.06", handler)
+        self.assertIn("ANGLE_COLOR = 'orange'", handler)
+        self.assertIn("ANGLE_GUIDE_CYLINDER_RADIUS = 0.035", handler)
+        self.assertIn("ANGLE_GUIDE_ARC_SEGMENTS = 24", handler)
+        self.assertIn("ANGLE_GUIDE_LABEL_RADIUS_FACTOR = 1.25", handler)
+        self.assertIn("Math.min(a.index, c.index)", handler)
+        self.assertIn("Math.max(a.index, c.index)", handler)
+
     def test_renderer_renders_molecule_animation_and_overlays(self):
         fake = FakeViewer()
         scene = GridScene(
@@ -92,6 +111,11 @@ class Scene3DTests(unittest.TestCase):
         self.assertIn("addSphere", call_names)
         self.assertIn("addCylinder", call_names)
         self.assertIn("setClickable", call_names)
+        distance_cylinder_call = next(
+            call for call in fake.calls if call[0] == "addCylinder"
+        )
+        self.assertEqual(distance_cylinder_call[1][0]["color"], "green")
+        self.assertEqual(distance_cylinder_call[1][0]["radius"], 0.06)
 
     def test_renderer_renders_arrow_and_screen_label_overlays(self):
         fake = FakeViewer()
@@ -165,6 +189,22 @@ class Scene3DTests(unittest.TestCase):
         self.assertGreater(label_position["x"], 0.0)
         self.assertGreater(label_position["y"], 0.0)
         self.assertAlmostEqual(label_position["z"], 0.0)
+
+    def test_legacy_mol_grid_uses_shared_click_handler(self):
+        fake = FakeViewer()
+        mol = Chem.AddHs(Chem.MolFromSmiles("O"))
+        AllChem.EmbedMolecule(mol, randomSeed=0xF00D)
+
+        with patch("py3Dmol.view", return_value=fake):
+            tooltoad_vis._MolTo3DGrid_legacy(
+                mol,
+                show_confs=False,
+                show_charges=False,
+            )
+
+        set_click_calls = [call for call in fake.calls if call[0] == "setClickable"]
+        self.assertTrue(set_click_calls)
+        self.assertIs(set_click_calls[-1][1][2], Py3DmolGridRenderer._CLICK_HANDLER)
 
     def test_angle_guide_geometry_for_right_angle(self):
         geometry = _angle_guide_geometry(

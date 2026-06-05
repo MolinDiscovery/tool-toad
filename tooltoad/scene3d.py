@@ -465,10 +465,164 @@ class Py3DmolGridRenderer:
     """Render :class:`GridScene` objects with py3Dmol."""
 
     _CLICK_HANDLER = r'''function(atom, viewer, event, container) {
+        var DISTANCE_COLOR = 'green';
+        var DISTANCE_RADIUS = 0.06;
+        var ANGLE_COLOR = 'orange';
+        var ANGLE_GUIDE_RADIUS_FRACTION = 0.45;
+        var ANGLE_GUIDE_MAX_RADIUS = 1.0;
+        var ANGLE_GUIDE_CYLINDER_RADIUS = 0.035;
+        var ANGLE_GUIDE_ARC_SEGMENTS = 24;
+        var ANGLE_GUIDE_LABEL_RADIUS_FACTOR = 1.25;
+        var ANGLE_GUIDE_EPSILON = 1.0e-8;
+
         if(!viewer._picks)       viewer._picks = [];
         if(!viewer._distLabels)  viewer._distLabels = {};
+        if(!viewer._distLines)   viewer._distLines = {};
         if(!viewer._anglePicks)  viewer._anglePicks = [];
         if(!viewer._angleLabels) viewer._angleLabels = {};
+        if(!viewer._angleShapes) viewer._angleShapes = {};
+
+        function xyz(point) {
+            return {x: point.x, y: point.y, z: point.z};
+        }
+
+        function vec(u, v) {
+            return {x: u.x - v.x, y: u.y - v.y, z: u.z - v.z};
+        }
+
+        function add(u, v) {
+            return {x: u.x + v.x, y: u.y + v.y, z: u.z + v.z};
+        }
+
+        function subtract(u, v) {
+            return {x: u.x - v.x, y: u.y - v.y, z: u.z - v.z};
+        }
+
+        function scale(u, factor) {
+            return {x: u.x * factor, y: u.y * factor, z: u.z * factor};
+        }
+
+        function dot(u, v) {
+            return u.x * v.x + u.y * v.y + u.z * v.z;
+        }
+
+        function cross(u, v) {
+            return {
+                x: u.y * v.z - u.z * v.y,
+                y: u.z * v.x - u.x * v.z,
+                z: u.x * v.y - u.y * v.x
+            };
+        }
+
+        function norm(u) {
+            return Math.sqrt(dot(u, u));
+        }
+
+        function unit(u) {
+            var length = norm(u);
+            if(length < ANGLE_GUIDE_EPSILON) {
+                return null;
+            }
+            return scale(u, 1.0 / length);
+        }
+
+        function clamp(value, lower, upper) {
+            return Math.max(lower, Math.min(upper, value));
+        }
+
+        function orthogonalUnitVector(vector) {
+            var axis = {x: 1.0, y: 0.0, z: 0.0};
+            if(Math.abs(dot(vector, axis)) > 0.9) {
+                axis = {x: 0.0, y: 1.0, z: 0.0};
+            }
+            return unit(cross(vector, axis));
+        }
+
+        function removeShapeList(shapeMap, key) {
+            if(key in shapeMap) {
+                for(var i = 0; i < shapeMap[key].length; i++) {
+                    viewer.removeShape(shapeMap[key][i]);
+                }
+                delete shapeMap[key];
+            }
+        }
+
+        function angleKey(a, b, c) {
+            var endpoint1 = Math.min(a.index, c.index);
+            var endpoint2 = Math.max(a.index, c.index);
+            return [endpoint1, b.index, endpoint2].join('-');
+        }
+
+        function angleGuideGeometry(a, b, c) {
+            var vec1 = vec(a, b);
+            var vec3 = vec(c, b);
+            var norm1 = norm(vec1);
+            var norm3 = norm(vec3);
+            if(norm1 < ANGLE_GUIDE_EPSILON || norm3 < ANGLE_GUIDE_EPSILON) {
+                return null;
+            }
+
+            var unit1 = scale(vec1, 1.0 / norm1);
+            var unit3 = scale(vec3, 1.0 / norm3);
+            var cosine = clamp(dot(unit1, unit3), -1.0, 1.0);
+            var angle = Math.acos(cosine);
+            var arcRadius = Math.min(
+                ANGLE_GUIDE_RADIUS_FRACTION * Math.min(norm1, norm3),
+                ANGLE_GUIDE_MAX_RADIUS
+            );
+
+            var planeY = subtract(unit3, scale(unit1, cosine));
+            var planeYNorm = norm(planeY);
+            if(planeYNorm < ANGLE_GUIDE_EPSILON) {
+                planeY = orthogonalUnitVector(unit1);
+            } else {
+                planeY = scale(planeY, 1.0 / planeYNorm);
+            }
+
+            if(planeY === null) {
+                return null;
+            }
+
+            var arcSegments = [];
+            var previousPoint = null;
+            for(var idx = 0; idx <= ANGLE_GUIDE_ARC_SEGMENTS; idx++) {
+                var theta = angle * idx / ANGLE_GUIDE_ARC_SEGMENTS;
+                var direction = add(
+                    scale(unit1, Math.cos(theta)),
+                    scale(planeY, Math.sin(theta))
+                );
+                var point = add(b, scale(direction, arcRadius));
+                if(previousPoint !== null && (idx - 1) % 2 === 0) {
+                    arcSegments.push([previousPoint, point]);
+                }
+                previousPoint = point;
+            }
+
+            var labelDirection = add(unit1, unit3);
+            var labelDirectionNorm = norm(labelDirection);
+            if(labelDirectionNorm < ANGLE_GUIDE_EPSILON) {
+                var halfAngle = angle * 0.5;
+                labelDirection = add(
+                    scale(unit1, Math.cos(halfAngle)),
+                    scale(planeY, Math.sin(halfAngle))
+                );
+            } else {
+                labelDirection = scale(labelDirection, 1.0 / labelDirectionNorm);
+            }
+
+            return {
+                angleDegrees: angle * (180.0 / Math.PI),
+                armEnds: [a, c],
+                arcSegments: arcSegments,
+                labelPosition: add(
+                    b,
+                    scale(
+                        labelDirection,
+                        arcRadius * ANGLE_GUIDE_LABEL_RADIUS_FACTOR
+                    )
+                )
+            };
+        }
 
         if(event.shiftKey) {
             viewer._anglePicks.push(atom);
@@ -476,50 +630,85 @@ class Py3DmolGridRenderer:
                 var A = viewer._anglePicks[0],
                     B = viewer._anglePicks[1],
                     C = viewer._anglePicks[2];
-                var key = [A.index,B.index,C.index].join('-');
-                if(key in viewer._angleLabels) {
-                    viewer.removeLabel(viewer._angleLabels[key]);
-                    delete viewer._angleLabels[key];
+                var angleMeasurementKey = angleKey(A, B, C);
+                if(angleMeasurementKey in viewer._angleLabels) {
+                    viewer.removeLabel(viewer._angleLabels[angleMeasurementKey]);
+                    delete viewer._angleLabels[angleMeasurementKey];
+                    removeShapeList(viewer._angleShapes, angleMeasurementKey);
                 } else {
-                    function vec(u,v){
-                        return {x:u.x-v.x, y:u.y-v.y, z:u.z-v.z};
-                    };
-                    var vBA=vec(A,B), vBC=vec(C,B);
-                    var dot=vBA.x*vBC.x+vBA.y*vBC.y+vBA.z*vBC.z;
-                    var magBA=Math.sqrt(vBA.x*vBA.x+vBA.y*vBA.y+vBA.z*vBA.z);
-                    var magBC=Math.sqrt(vBC.x*vBC.x+vBC.y*vBC.y+vBC.z*vBC.z);
-                    var angle=(Math.acos(dot/(magBA*magBC))*(180/Math.PI))
-                              .toFixed(2)+'°';
-                    var lbl = viewer.addLabel(angle, {
-                        position:{x:B.x,y:B.y,z:B.z},
-                        backgroundColor:'blue',
-                        fontColor:'white',
-                        fontSize:12
-                    });
-                    viewer._angleLabels[key] = lbl;
+                    var geometry = angleGuideGeometry(A, B, C);
+                    if(geometry !== null) {
+                        viewer._angleShapes[angleMeasurementKey] = [];
+                        for(var armIdx = 0; armIdx < geometry.armEnds.length; armIdx++) {
+                            viewer._angleShapes[angleMeasurementKey].push(
+                                viewer.addCylinder({
+                                    start: xyz(B),
+                                    end: xyz(geometry.armEnds[armIdx]),
+                                    radius: ANGLE_GUIDE_CYLINDER_RADIUS,
+                                    color: ANGLE_COLOR
+                                })
+                            );
+                        }
+                        for(var segIdx = 0; segIdx < geometry.arcSegments.length; segIdx++) {
+                            viewer._angleShapes[angleMeasurementKey].push(
+                                viewer.addCylinder({
+                                    start: xyz(geometry.arcSegments[segIdx][0]),
+                                    end: xyz(geometry.arcSegments[segIdx][1]),
+                                    radius: ANGLE_GUIDE_CYLINDER_RADIUS,
+                                    color: ANGLE_COLOR
+                                })
+                            );
+                        }
+                        var angleText = geometry.angleDegrees.toFixed(2) + '°';
+                        var angleLabel = viewer.addLabel(angleText, {
+                            position: xyz(geometry.labelPosition),
+                            backgroundColor: 'white',
+                            fontColor: ANGLE_COLOR,
+                            fontSize: 12
+                        });
+                        viewer._angleLabels[angleMeasurementKey] = angleLabel;
+                    }
                 }
                 viewer._anglePicks = [];
             }
         } else if(event.ctrlKey) {
             viewer._picks.push(atom);
             if(viewer._picks.length === 2) {
-                var a=viewer._picks[0], b=viewer._picks[1];
-                var key=[Math.min(a.index,b.index), Math.max(a.index,b.index)]
-                        .join('-');
-                if(key in viewer._distLabels) {
-                    viewer.removeLabel(viewer._distLabels[key]);
-                    delete viewer._distLabels[key];
+                var a = viewer._picks[0], b = viewer._picks[1];
+                var distanceMeasurementKey = [
+                    Math.min(a.index, b.index),
+                    Math.max(a.index, b.index)
+                ].join('-');
+                if(distanceMeasurementKey in viewer._distLabels) {
+                    viewer.removeLabel(viewer._distLabels[distanceMeasurementKey]);
+                    delete viewer._distLabels[distanceMeasurementKey];
+                    if(distanceMeasurementKey in viewer._distLines) {
+                        viewer.removeShape(viewer._distLines[distanceMeasurementKey]);
+                        delete viewer._distLines[distanceMeasurementKey];
+                    }
                 } else {
-                    var dx=a.x-b.x, dy=a.y-b.y, dz=a.z-b.z;
-                    var dist=Math.sqrt(dx*dx+dy*dy+dz*dz).toFixed(3)+' Å';
-                    var mid={x:(a.x+b.x)/2, y:(a.y+b.y)/2, z:(a.z+b.z)/2};
-                    var lbl=viewer.addLabel(dist, {
-                        position:mid,
-                        backgroundColor:'grey',
-                        fontColor:'white',
-                        fontSize:12
+                    var dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+                    var dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+                              .toFixed(3) + ' Å';
+                    var mid = {
+                        x: (a.x + b.x) / 2,
+                        y: (a.y + b.y) / 2,
+                        z: (a.z + b.z) / 2
+                    };
+                    var line = viewer.addCylinder({
+                        start: xyz(a),
+                        end: xyz(b),
+                        radius: DISTANCE_RADIUS,
+                        color: DISTANCE_COLOR
                     });
-                    viewer._distLabels[key]=lbl;
+                    var lbl = viewer.addLabel(dist, {
+                        position: mid,
+                        backgroundColor: 'white',
+                        fontColor: DISTANCE_COLOR,
+                        fontSize: 12
+                    });
+                    viewer._distLines[distanceMeasurementKey] = line;
+                    viewer._distLabels[distanceMeasurementKey] = lbl;
                 }
                 viewer._picks = [];
             }
@@ -529,10 +718,10 @@ class Py3DmolGridRenderer:
                 delete atom.label;
             } else {
                 atom.label = viewer.addLabel(atom.index, {
-                    position:atom,
-                    backgroundColor:'white',
-                    fontColor:'black',
-                    fontSize:12
+                    position: atom,
+                    backgroundColor: 'white',
+                    fontColor: 'black',
+                    fontSize: 12
                 });
             }
         }
