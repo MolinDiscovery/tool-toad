@@ -27,6 +27,7 @@ from tooltoad.vis import RxnTo3DGrid, reaction_scene_cells, show_scene
 class FakeViewer:
     def __init__(self):
         self.calls = []
+        self.startjs = ""
 
     def __getattr__(self, name):
         def method(*args, **kwargs):

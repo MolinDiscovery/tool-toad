@@ -15,7 +15,7 @@ dependencies = [
     "hide_warnings",
     "tqdm",
     "python-dotenv",
-    "py3Dmol",
+    "py3Dmol==2.5.5",
     "tabulate",
     "tomli",
     "networkx",
