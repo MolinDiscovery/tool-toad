@@ -464,6 +464,60 @@ def molecule_model_from_mol(
 class Py3DmolGridRenderer:
     """Render :class:`GridScene` objects with py3Dmol."""
 
+    # 3Dmol 2.5.5 rebuilds animated models without releasing their old child
+    # geometry/materials or resetting picking shapes. Dispose after rendering
+    # so the replacement has acquired shared shader programs before release.
+    _VIBRATION_RENDER_CLEANUP = r'''function(viewer) {
+    if (viewer._tooltoadVibrationCleanup) return;
+    viewer._tooltoadVibrationCleanup = true;
+    // A notebook webview can retain an older engine after a Python upgrade.
+    // Keep resume idempotent even when its cached engine predates the timer fix.
+    const resumeAnimate = viewer.resumeAnimate;
+    viewer.resumeAnimate = function() {
+        this.animationTimers.forEach(timer => timer.cancel());
+        return resumeAnimate.apply(this, arguments);
+    };
+    const render = viewer.render;
+    viewer.render = function() {
+        const previous = this.models.map(model => model.renderedMolObj);
+        this.models.forEach(model => {
+            if (model.molObj === null) {
+                model.atoms.forEach(atom => {
+                    if (atom.clickable || atom.hoverable) {
+                        atom.intersectionShape = {sphere: [], cylinder: [], line: [], triangle: []};
+                    }
+                });
+            }
+        });
+        try {
+            return render.apply(this, arguments);
+        } finally {
+            const geometries = new Set(), materials = new Set();
+            const collect = object => {
+                if (object.geometry) geometries.add(object.geometry);
+                if (object.material) materials.add(object.material);
+                (object.children || []).forEach(collect);
+            };
+            previous.forEach((object, index) => {
+                if (object && object !== this.models[index]?.renderedMolObj) collect(object);
+            });
+            geometries.forEach(geometry => {
+                // 3Dmol's deallocator omits the extra instanced-mesh buffers.
+                (geometry.geometryGroups || []).forEach(group => {
+                    ["__webglRadiusBuffer", "__webglOffsetBuffer"].forEach(key => {
+                        if (group[key]) {
+                            viewer.renderer._gl.deleteBuffer(group[key]);
+                            group[key] = undefined;
+                        }
+                    });
+                });
+                geometry.dispose();
+            });
+            materials.forEach(material => material.dispose());
+        }
+    };
+}'''
+
     _CLICK_HANDLER = r'''function(atom, viewer, event, container) {
         var DISTANCE_COLOR = 'green';
         var DISTANCE_RADIUS = 0.06;
@@ -987,6 +1041,11 @@ class Py3DmolGridRenderer:
         animation: VibrationAnimation,
         viewer_position: tuple[int, int],
     ) -> None:
+        row, column = viewer_position
+        self.viewer.startjs += (
+            f"({self._VIBRATION_RENDER_CLEANUP})"
+            f"(viewergrid_UNIQUEID[{row}][{column}]);\n"
+        )
         propmap = [
             {"index": atom_idx, "props": {"dx": mode[0], "dy": mode[1], "dz": mode[2]}}
             for atom_idx, mode in enumerate(animation.mode)
